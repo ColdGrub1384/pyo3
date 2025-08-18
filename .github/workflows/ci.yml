@@ -20,7 +20,7 @@ jobs:
   fmt:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -39,7 +39,7 @@ jobs:
       MSRV: ${{ steps.resolve-msrv.outputs.MSRV }}
       verbose: ${{ runner.debug == '1' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -52,7 +52,7 @@ jobs:
     needs: [fmt]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -62,7 +62,7 @@ jobs:
     needs: [fmt, resolve]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ needs.resolve.outputs.MSRV }}
@@ -151,7 +151,7 @@ jobs:
     name: clippy/${{ matrix.platform.rust-target }}/${{ matrix.rust }}
     continue-on-error: ${{ matrix.rust != 'stable' }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.rust }}
@@ -442,7 +442,7 @@ jobs:
     needs: [fmt]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -463,7 +463,7 @@ jobs:
     needs: [fmt]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -485,7 +485,7 @@ jobs:
     needs: [fmt]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -503,7 +503,7 @@ jobs:
     needs: [fmt]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           # TODO bump emscripten builds to test on 3.13
@@ -544,7 +544,7 @@ jobs:
     needs: [fmt]
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'CI-save-pr-cache') }}
@@ -588,7 +588,7 @@ jobs:
     if: ${{ contains(github.event.pull_request.labels.*.name, 'CI-build-full') || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -612,7 +612,7 @@ jobs:
         include:
           - rust: ${{ needs.resolve.outputs.MSRV }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -663,7 +663,7 @@ jobs:
             target: "aarch64-pc-windows-msvc"
             flags: "-i python3.13 --features generate-import-lib"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -693,7 +693,7 @@ jobs:
     if: ${{ contains(github.event.pull_request.labels.*.name, 'CI-build-full') || github.event_name != 'pull_request' }}
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13"
@@ -757,7 +757,7 @@ jobs:
           ]
     runs-on: ${{ matrix.platform.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.platform.rust-target }}
