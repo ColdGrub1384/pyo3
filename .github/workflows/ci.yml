@@ -21,7 +21,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - run: python -m pip install --upgrade pip && pip install nox
@@ -40,7 +40,7 @@ jobs:
       verbose: ${{ runner.debug == '1' }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - name: resolve MSRV
@@ -53,7 +53,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - uses: obi1kenobi/cargo-semver-checks-action@v2
@@ -67,7 +67,7 @@ jobs:
         with:
           toolchain: ${{ needs.resolve.outputs.MSRV }}
           components: rust-src
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - uses: Swatinem/rust-cache@v2
@@ -157,7 +157,7 @@ jobs:
           toolchain: ${{ matrix.rust }}
           targets: ${{ matrix.platform.rust-target }}
           components: clippy,rust-src
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           # FIXME: 3.13.4 has an issue on windows so pinned to 3.13.3
           # once 3.13.5 is out, unpin the patch version
@@ -443,7 +443,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - uses: Swatinem/rust-cache@v2
@@ -464,7 +464,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - uses: Swatinem/rust-cache@v2
@@ -486,7 +486,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - uses: Swatinem/rust-cache@v2
@@ -504,7 +504,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           # TODO bump emscripten builds to test on 3.13
           python-version: 3.11
@@ -589,7 +589,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - uses: Swatinem/rust-cache@v2
@@ -613,7 +613,7 @@ jobs:
           - rust: ${{ needs.resolve.outputs.MSRV }}
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - uses: Swatinem/rust-cache@v2
@@ -664,7 +664,7 @@ jobs:
             flags: "-i python3.13 --features generate-import-lib"
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - uses: Swatinem/rust-cache@v2
@@ -694,7 +694,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
       - uses: Swatinem/rust-cache@v2
@@ -762,7 +762,7 @@ jobs:
         with:
           targets: ${{ matrix.platform.rust-target }}
           components: rust-src
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v6
         with:
           python-version: "3.13"
           architecture: ${{ matrix.platform.python-architecture }}
