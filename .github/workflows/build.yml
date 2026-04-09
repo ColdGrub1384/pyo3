@@ -23,13 +23,16 @@ on:
         type: boolean
         default: false
 
+env:
+  NOX_DEFAULT_VENV_BACKEND: uv
+
 jobs:
   build:
-    continue-on-error: ${{ endsWith(inputs.python-version, '-dev') || contains(fromJSON('["3.7", "3.8"]'), inputs.python-version) || contains(fromJSON('["beta", "nightly"]'), inputs.rust) }}
+    continue-on-error: ${{ endsWith(inputs.python-version, '-dev') || contains(fromJSON('["3.8"]'), inputs.python-version) || contains(fromJSON('["beta", "nightly"]'), inputs.rust) }}
     runs-on: ${{ inputs.os }}
     if: ${{ !(startsWith(inputs.python-version, 'graalpy') && startsWith(inputs.os, 'windows')) }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6.0.2
         with:
           # For PRs, we need to run on the real PR head, not the resultant merge of the PR into the target branch.
           #
@@ -40,16 +43,26 @@ jobs:
           # with the commit diff, because the merge may affect line numbers.
           ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
-      - name: Set up Python ${{ inputs.python-version }}
-        uses: actions/setup-python@v5
+      # installs using setup-python do not work for arm macOS 3.9 and below
+      - if: ${{ !(inputs.os == 'macos-latest' && contains(fromJSON('["3.8", "3.9"]'), inputs.python-version) && inputs.python-architecture == 'x64') }}
+        name: Set up Python ${{ inputs.python-version }}
+        uses: actions/setup-python@v6
         with:
           python-version: ${{ inputs.python-version }}
           architecture: ${{ inputs.python-architecture }}
           # PyPy can have FFI changes within Python versions, which creates pain in CI
           check-latest: ${{ startsWith(inputs.python-version, 'pypy') }}
 
+      # workaround for the above, only available for 3.9
+      - if: ${{ inputs.os == 'macos-latest' && contains(fromJSON('["3.9"]'), inputs.python-version) && inputs.python-architecture == 'x64' }}
+        name: Set up Python ${{ inputs.python-version }}
+        uses: astral-sh/setup-uv@v7
+        with:
+          python-version: cpython-${{ inputs.python-version }}-macos-x86-64
+          save-cache: ${{ github.ref == 'refs/heads/main' || contains(github.event.pull_request.labels.*.name, 'CI-save-pr-cache') }}
+
       - name: Install nox
-        run: python -m pip install --upgrade pip && pip install nox
+        run: python -m pip install --upgrade pip && pip install nox[uv]
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@master
@@ -68,16 +81,8 @@ jobs:
         run: |
           echo "CARGO_BUILD_TARGET=i686-pc-windows-msvc" >> $GITHUB_ENV
 
-      # windows on arm image contains x86-64 libclang
-      - name: Install LLVM and Clang
-        if: inputs.os == 'windows-11-arm'
-        uses: KyleMayes/install-llvm-action@v2
-        with:
-          # to match windows-2022 images
-          version: "18"
-
-      - name: Install zoneinfo backport for Python 3.7 / 3.8
-        if: contains(fromJSON('["3.7", "3.8"]'), inputs.python-version)
+      - name: Install zoneinfo backport for Python 3.8
+        if: contains(fromJSON('["3.8"]'), inputs.python-version)
         run: python -m pip install backports.zoneinfo
 
       - uses: Swatinem/rust-cache@v2
@@ -96,7 +101,7 @@ jobs:
         name: Ignore changed error messages when using trybuild
         run: echo "TRYBUILD=overwrite" >> "$GITHUB_ENV"
 
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         if: ${{ inputs.rust == 'stable' && !startsWith(inputs.python-version, 'graalpy') }}
         id: ffi-changes
         with:
@@ -110,19 +115,14 @@ jobs:
               - '.github/workflows/build.yml'
 
       - name: Run pyo3-ffi-check
-        # Python 3.13.4 has an issue on Windows where the headers are configured to always be free-threaded
-        # https://discuss.python.org/t/heads-up-3-13-5-release-coming-soon/94535
-        continue-on-error: ${{ inputs.python-version == '3.13' && (inputs.os == 'windows-latest' || inputs.os == 'windows-11-arm') }}
-        # pypy 3.9 on windows is not PEP 3123 compliant, nor is graalpy
-        if: ${{ endsWith(inputs.python-version, '-dev') || (steps.ffi-changes.outputs.changed == 'true' && inputs.rust == 'stable' && !startsWith(inputs.python-version, 'graalpy') && !(inputs.python-version == 'pypy3.9' && contains(inputs.os, 'windows'))) }}
+        # TODO: investigate graalpy failures
+        if: ${{ endsWith(inputs.python-version, '-dev') || (steps.ffi-changes.outputs.changed == 'true' && inputs.rust == 'stable' && !startsWith(inputs.python-version, 'graalpy')) }}
         run: nox -s ffi-check
 
-      - if: ${{ github.event_name != 'merge_group' }}
-        name: Install cargo-llvm-cov
+      - name: Install cargo-llvm-cov
         uses: taiki-e/install-action@cargo-llvm-cov
 
-      - if: ${{ github.event_name != 'merge_group' }}
-        name: Prepare coverage environment
+      - name: Prepare coverage environment
         run: |
           cargo llvm-cov clean --workspace --profraw-only
           nox -s set-coverage-env
@@ -136,12 +136,10 @@ jobs:
       - name: Test python examples and tests
         shell: bash
         run: nox -s test-py
-        continue-on-error: ${{ endsWith(inputs.python-version, '-dev') }}
         env:
           CARGO_TARGET_DIR: ${{ github.workspace }}/target
 
-      - if: ${{ github.event_name != 'merge_group' }}
-        name: Generate coverage report
+      - name: Generate coverage report
         # needs investigation why llvm-cov fails on windows-11-arm
         continue-on-error: ${{ inputs.os == 'windows-11-arm' }}
         run: cargo llvm-cov
@@ -152,9 +150,8 @@ jobs:
           --package=pyo3-ffi
           report --codecov --output-path coverage.json
 
-      - if: ${{ github.event_name != 'merge_group' }}
-        name: Upload coverage report
-        uses: codecov/codecov-action@v5
+      - name: Upload coverage report
+        uses: codecov/codecov-action@v6
         # needs investigation why llvm-cov fails on windows-11-arm
         continue-on-error: ${{ inputs.os == 'windows-11-arm' }}
         with:

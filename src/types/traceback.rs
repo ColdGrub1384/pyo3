@@ -1,6 +1,8 @@
 use crate::err::{error_on_minusone, PyResult};
 use crate::types::{any::PyAnyMethods, string::PyStringMethods, PyString};
 use crate::{ffi, Bound, PyAny};
+#[cfg(all(not(Py_LIMITED_API), not(PyPy), not(GraalPy)))]
+use crate::{types::PyFrame, PyTypeCheck, Python};
 
 /// Represents a Python traceback.
 ///
@@ -15,8 +17,31 @@ pub struct PyTraceback(PyAny);
 pyobject_native_type_core!(
     PyTraceback,
     pyobject_native_static_type_object!(ffi::PyTraceBack_Type),
+    "builtins",
+    "traceback",
     #checkfunction=ffi::PyTraceBack_Check
 );
+
+impl PyTraceback {
+    /// Creates a new traceback object from the given frame.
+    ///
+    /// The `next` is the next traceback in the direction of where the exception was raised
+    /// or `None` if this is the last frame in the traceback.
+    #[cfg(all(not(Py_LIMITED_API), not(PyPy), not(GraalPy)))]
+    pub fn new<'py>(
+        py: Python<'py>,
+        next: Option<Bound<'py, PyTraceback>>,
+        frame: Bound<'py, PyFrame>,
+        instruction_index: i32,
+        line_number: i32,
+    ) -> PyResult<Bound<'py, PyTraceback>> {
+        unsafe {
+            Ok(PyTraceback::classinfo_object(py)
+                .call1((next, frame, instruction_index, line_number))?
+                .cast_into_unchecked())
+        }
+    }
+}
 
 /// Implementation of functionality for [`PyTraceback`].
 ///
@@ -39,7 +64,7 @@ pub trait PyTracebackMethods<'py>: crate::sealed::Sealed {
     /// # let result: PyResult<()> =
     /// Python::attach(|py| {
     ///     let err = py
-    ///         .run(c_str!("raise Exception('banana')"), None, None)
+    ///         .run(c"raise Exception('banana')", None, None)
     ///         .expect_err("raise will create a Python error");
     ///
     ///     let traceback = err.traceback(py).expect("raised exception will have a traceback");
@@ -71,7 +96,7 @@ impl<'py> PyTracebackMethods<'py> for Bound<'py, PyTraceback> {
         let formatted = string_io
             .getattr(intern!(py, "getvalue"))?
             .call0()?
-            .downcast::<PyString>()?
+            .cast::<PyString>()?
             .to_cow()?
             .into_owned();
         Ok(formatted)
@@ -80,10 +105,10 @@ impl<'py> PyTracebackMethods<'py> for Bound<'py, PyTraceback> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
     use crate::IntoPyObject;
     use crate::{
-        ffi,
-        types::{any::PyAnyMethods, dict::PyDictMethods, traceback::PyTracebackMethods, PyDict},
+        types::{dict::PyDictMethods, PyDict},
         PyErr, Python,
     };
 
@@ -91,7 +116,7 @@ mod tests {
     fn format_traceback() {
         Python::attach(|py| {
             let err = py
-                .run(ffi::c_str!("raise Exception('banana')"), None, None)
+                .run(c"raise Exception('banana')", None, None)
                 .expect_err("raising should have given us an error");
 
             assert_eq!(
@@ -107,14 +132,12 @@ mod tests {
             let locals = PyDict::new(py);
             // Produce an error from python so that it has a traceback
             py.run(
-                ffi::c_str!(
-                    r"
+                cr"
 try:
     raise ValueError('raised exception')
 except Exception as e:
     err = e
-"
-                ),
+",
                 None,
                 Some(&locals),
             )
@@ -131,12 +154,10 @@ except Exception as e:
             let locals = PyDict::new(py);
             // Produce an error from python so that it has a traceback
             py.run(
-                ffi::c_str!(
-                    r"
+                cr"
 def f():
     raise ValueError('raised exception')
-"
-                ),
+",
                 None,
                 Some(&locals),
             )
@@ -147,6 +168,32 @@ def f():
             let err_object = err.clone_ref(py).into_pyobject(py).unwrap();
 
             assert!(err_object.getattr("__traceback__").unwrap().is(&traceback));
+        })
+    }
+
+    #[test]
+    #[cfg(all(not(Py_LIMITED_API), not(PyPy), not(GraalPy)))]
+    fn test_create_traceback() {
+        Python::attach(|py| {
+            let traceback = PyTraceback::new(
+                py,
+                None,
+                PyFrame::new(py, c"file2.py", c"func2", 20).unwrap(),
+                0,
+                20,
+            )
+            .unwrap();
+            let traceback = PyTraceback::new(
+                py,
+                Some(traceback),
+                PyFrame::new(py, c"file1.py", c"func1", 10).unwrap(),
+                0,
+                10,
+            )
+            .unwrap();
+            assert_eq!(
+                traceback.format().unwrap(), "Traceback (most recent call last):\n  File \"file1.py\", line 10, in func1\n  File \"file2.py\", line 20, in func2\n"
+            );
         })
     }
 }

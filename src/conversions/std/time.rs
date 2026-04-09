@@ -1,8 +1,12 @@
 use crate::conversion::IntoPyObject;
 use crate::exceptions::{PyOverflowError, PyValueError};
+#[cfg(feature = "experimental-inspect")]
+use crate::inspect::PyStaticExpr;
 #[cfg(Py_LIMITED_API)]
 use crate::intern;
-use crate::sync::GILOnceCell;
+use crate::sync::PyOnceLock;
+#[cfg(feature = "experimental-inspect")]
+use crate::type_object::PyTypeInfo;
 use crate::types::any::PyAnyMethods;
 #[cfg(not(Py_LIMITED_API))]
 use crate::types::PyDeltaAccess;
@@ -12,9 +16,14 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
 
-impl FromPyObject<'_> for Duration {
-    fn extract_bound(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
-        let delta = obj.downcast::<PyDelta>()?;
+impl FromPyObject<'_, '_> for Duration {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr = PyDelta::TYPE_HINT;
+
+    fn extract(obj: Borrowed<'_, '_, PyAny>) -> Result<Self, Self::Error> {
+        let delta = obj.cast::<PyDelta>()?;
         #[cfg(not(Py_LIMITED_API))]
         let (days, seconds, microseconds) = {
             (
@@ -55,6 +64,9 @@ impl<'py> IntoPyObject<'py> for Duration {
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = PyDelta::TYPE_HINT;
+
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let days = self.as_secs() / SECONDS_PER_DAY;
         let seconds = self.as_secs() % SECONDS_PER_DAY;
@@ -75,6 +87,9 @@ impl<'py> IntoPyObject<'py> for &Duration {
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = Duration::OUTPUT_TYPE;
+
     #[inline]
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         (*self).into_pyobject(py)
@@ -87,8 +102,13 @@ impl<'py> IntoPyObject<'py> for &Duration {
 //
 // TODO: it might be nice to investigate using timestamps anyway, at least when the datetime is a safe range.
 
-impl FromPyObject<'_> for SystemTime {
-    fn extract_bound(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+impl FromPyObject<'_, '_> for SystemTime {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr = PyDateTime::TYPE_HINT;
+
+    fn extract(obj: Borrowed<'_, '_, PyAny>) -> Result<Self, Self::Error> {
         let duration_since_unix_epoch: Duration = obj.sub(unix_epoch_py(obj.py())?)?.extract()?;
         UNIX_EPOCH
             .checked_add(duration_since_unix_epoch)
@@ -103,12 +123,15 @@ impl<'py> IntoPyObject<'py> for SystemTime {
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = PyDateTime::TYPE_HINT;
+
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let duration_since_unix_epoch =
             self.duration_since(UNIX_EPOCH).unwrap().into_pyobject(py)?;
         unix_epoch_py(py)?
             .add(duration_since_unix_epoch)?
-            .downcast_into()
+            .cast_into()
             .map_err(Into::into)
     }
 }
@@ -118,6 +141,9 @@ impl<'py> IntoPyObject<'py> for &SystemTime {
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = SystemTime::OUTPUT_TYPE;
+
     #[inline]
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         (*self).into_pyobject(py)
@@ -125,7 +151,7 @@ impl<'py> IntoPyObject<'py> for &SystemTime {
 }
 
 fn unix_epoch_py(py: Python<'_>) -> PyResult<Borrowed<'_, '_, PyDateTime>> {
-    static UNIX_EPOCH: GILOnceCell<Py<PyDateTime>> = GILOnceCell::new();
+    static UNIX_EPOCH: PyOnceLock<Py<PyDateTime>> = PyOnceLock::new();
     Ok(UNIX_EPOCH
         .get_or_try_init(py, || {
             let utc = PyTzInfo::utc(py)?;
@@ -308,7 +334,7 @@ mod tests {
         });
     }
 
-    #[allow(clippy::too_many_arguments)]
+    #[expect(clippy::too_many_arguments)]
     fn new_datetime(
         py: Python<'_>,
         year: i32,
@@ -343,7 +369,7 @@ mod tests {
         naive_max
             .call_method("replace", (), Some(&kargs))
             .unwrap()
-            .downcast_into()
+            .cast_into()
             .unwrap()
     }
 

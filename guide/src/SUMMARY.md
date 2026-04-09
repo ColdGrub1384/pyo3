@@ -30,6 +30,7 @@
 - [Debugging](debugging.md)
 - [Features reference](features.md)
 - [Performance](performance.md)
+- [Type stub generation and introspection](type-stub.md)
 - [Advanced topics](advanced.md)
 - [Building and distribution](building-and-distribution.md)
   - [Supporting multiple Python versions](building-and-distribution/multiple-python-versions.md)
@@ -42,8 +43,13 @@
 ---
 
 [Appendix A: Migration guide](migration.md)
+
+[Appendix B: Glossary](glossary.md)
+
 [Appendix B: Trait bounds](trait-bounds.md)
+
 [Appendix C: Python typing hints](python-typing-hints.md)
+
 [CHANGELOG](changelog.md)
 
 ---

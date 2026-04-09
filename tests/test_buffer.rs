@@ -9,8 +9,7 @@ use std::{
 };
 
 #[macro_use]
-#[path = "../src/tests/common.rs"]
-mod common;
+mod test_utils;
 
 enum TestGetBufferError {
     NullShape,
@@ -49,7 +48,7 @@ impl TestBufferErrors {
             (*view).readonly = 1;
             (*view).itemsize = std::mem::size_of::<u32>() as isize;
 
-            let msg = ffi::c_str!("I");
+            let msg = c"I";
             (*view).format = msg.as_ptr() as *mut _;
 
             (*view).ndim = 1;
@@ -73,7 +72,7 @@ impl TestBufferErrors {
                         (*view).itemsize += 1;
                     }
                     IncorrectFormat => {
-                        (*view).format = ffi::c_str!("B").as_ptr() as _;
+                        (*view).format = c"B".as_ptr() as _;
                     }
                     IncorrectAlignment => (*view).buf = (*view).buf.add(1),
                 }

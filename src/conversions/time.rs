@@ -21,7 +21,7 @@
 //! use pyo3::{Python, PyResult, IntoPyObject, types::PyAnyMethods};
 //!
 //! fn main() -> PyResult<()> {
-//!     pyo3::prepare_freethreaded_python();
+//!     Python::initialize();
 //!     Python::attach(|py| {
 //!         // Create a fixed date and time (2022-01-01 12:00:00 UTC)
 //!         let date = Date::from_calendar_date(2022, Month::January, 1).unwrap();
@@ -51,6 +51,8 @@
 //! ```
 
 use crate::exceptions::{PyTypeError, PyValueError};
+#[cfg(feature = "experimental-inspect")]
+use crate::inspect::PyStaticExpr;
 #[cfg(Py_LIMITED_API)]
 use crate::intern;
 #[cfg(not(Py_LIMITED_API))]
@@ -58,7 +60,9 @@ use crate::types::datetime::{PyDateAccess, PyDeltaAccess};
 use crate::types::{PyAnyMethods, PyDate, PyDateTime, PyDelta, PyNone, PyTime, PyTzInfo};
 #[cfg(not(Py_LIMITED_API))]
 use crate::types::{PyTimeAccess, PyTzInfoAccess};
-use crate::{Bound, FromPyObject, IntoPyObject, PyAny, PyErr, PyResult, Python};
+#[cfg(feature = "experimental-inspect")]
+use crate::{type_hint_identifier, PyTypeInfo};
+use crate::{Borrowed, Bound, FromPyObject, IntoPyObject, PyAny, PyErr, PyResult, Python};
 use time::{
     Date, Duration, Month, OffsetDateTime, PrimitiveDateTime, Time, UtcDateTime, UtcOffset,
 };
@@ -72,6 +76,9 @@ macro_rules! impl_into_py_for_ref {
             type Target = $target;
             type Output = Bound<'py, Self::Target>;
             type Error = PyErr;
+
+            #[cfg(feature = "experimental-inspect")]
+            const OUTPUT_TYPE: PyStaticExpr = <$type>::OUTPUT_TYPE;
 
             #[inline]
             fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
@@ -105,7 +112,7 @@ macro_rules! month_from_number {
 fn extract_date_time(dt: &Bound<'_, PyAny>) -> PyResult<(Date, Time)> {
     #[cfg(not(Py_LIMITED_API))]
     {
-        let dt = dt.downcast::<PyDateTime>()?;
+        let dt = dt.cast::<PyDateTime>()?;
         let date = Date::from_calendar_date(
             dt.get_year(),
             month_from_number!(dt.get_month()),
@@ -149,6 +156,9 @@ impl<'py> IntoPyObject<'py> for Duration {
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = PyDelta::TYPE_HINT;
+
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let total_seconds = self.whole_seconds();
         let micro_seconds = self.subsec_microseconds();
@@ -180,11 +190,16 @@ impl<'py> IntoPyObject<'py> for Duration {
     }
 }
 
-impl FromPyObject<'_> for Duration {
-    fn extract_bound(ob: &Bound<'_, PyAny>) -> PyResult<Duration> {
+impl FromPyObject<'_, '_> for Duration {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr = PyDelta::TYPE_HINT;
+
+    fn extract(ob: Borrowed<'_, '_, PyAny>) -> Result<Self, Self::Error> {
         #[cfg(not(Py_LIMITED_API))]
         let (days, seconds, microseconds) = {
-            let delta = ob.downcast::<PyDelta>()?;
+            let delta = ob.cast::<PyDelta>()?;
             (
                 delta.get_days().into(),
                 delta.get_seconds().into(),
@@ -214,6 +229,9 @@ impl<'py> IntoPyObject<'py> for Date {
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = PyDate::TYPE_HINT;
+
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let year = self.year();
         let month = self.month() as u8;
@@ -223,12 +241,17 @@ impl<'py> IntoPyObject<'py> for Date {
     }
 }
 
-impl FromPyObject<'_> for Date {
-    fn extract_bound(ob: &Bound<'_, PyAny>) -> PyResult<Date> {
+impl FromPyObject<'_, '_> for Date {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr = PyDate::TYPE_HINT;
+
+    fn extract(ob: Borrowed<'_, '_, PyAny>) -> Result<Self, Self::Error> {
         let (year, month, day) = {
             #[cfg(not(Py_LIMITED_API))]
             {
-                let date = ob.downcast::<PyDate>()?;
+                let date = ob.cast::<PyDate>()?;
                 (date.get_year(), date.get_month(), date.get_day())
             }
 
@@ -254,6 +277,9 @@ impl<'py> IntoPyObject<'py> for Time {
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = PyTime::TYPE_HINT;
+
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let hour = self.hour();
         let minute = self.minute();
@@ -264,12 +290,17 @@ impl<'py> IntoPyObject<'py> for Time {
     }
 }
 
-impl FromPyObject<'_> for Time {
-    fn extract_bound(ob: &Bound<'_, PyAny>) -> PyResult<Time> {
+impl FromPyObject<'_, '_> for Time {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr = PyTime::TYPE_HINT;
+
+    fn extract(ob: Borrowed<'_, '_, PyAny>) -> Result<Self, Self::Error> {
         let (hour, minute, second, microsecond) = {
             #[cfg(not(Py_LIMITED_API))]
             {
-                let time = ob.downcast::<PyTime>()?;
+                let time = ob.cast::<PyTime>()?;
                 let hour: u8 = time.get_hour();
                 let minute: u8 = time.get_minute();
                 let second: u8 = time.get_second();
@@ -297,6 +328,9 @@ impl<'py> IntoPyObject<'py> for PrimitiveDateTime {
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = PyDateTime::TYPE_HINT;
+
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let date = self.date();
         let time = self.time();
@@ -323,12 +357,17 @@ impl<'py> IntoPyObject<'py> for PrimitiveDateTime {
     }
 }
 
-impl FromPyObject<'_> for PrimitiveDateTime {
-    fn extract_bound(dt: &Bound<'_, PyAny>) -> PyResult<PrimitiveDateTime> {
+impl FromPyObject<'_, '_> for PrimitiveDateTime {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr = PyDateTime::TYPE_HINT;
+
+    fn extract(dt: Borrowed<'_, '_, PyAny>) -> Result<Self, Self::Error> {
         let has_tzinfo = {
             #[cfg(not(Py_LIMITED_API))]
             {
-                let dt = dt.downcast::<PyDateTime>()?;
+                let dt = dt.cast::<PyDateTime>()?;
                 dt.get_tzinfo().is_some()
             }
             #[cfg(Py_LIMITED_API)]
@@ -341,7 +380,7 @@ impl FromPyObject<'_> for PrimitiveDateTime {
             return Err(PyTypeError::new_err("expected a datetime without tzinfo"));
         }
 
-        let (date, time) = extract_date_time(dt)?;
+        let (date, time) = extract_date_time(&dt)?;
 
         Ok(PrimitiveDateTime::new(date, time))
     }
@@ -352,6 +391,9 @@ impl<'py> IntoPyObject<'py> for UtcOffset {
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = type_hint_identifier!("datetime", "timezone");
+
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         // Get offset in seconds
         let seconds_offset = self.whole_seconds();
@@ -360,10 +402,15 @@ impl<'py> IntoPyObject<'py> for UtcOffset {
     }
 }
 
-impl FromPyObject<'_> for UtcOffset {
-    fn extract_bound(ob: &Bound<'_, PyAny>) -> PyResult<UtcOffset> {
+impl FromPyObject<'_, '_> for UtcOffset {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr = PyTzInfo::TYPE_HINT;
+
+    fn extract(ob: Borrowed<'_, '_, PyAny>) -> Result<Self, Self::Error> {
         #[cfg(not(Py_LIMITED_API))]
-        let ob = ob.downcast::<PyTzInfo>()?;
+        let ob = ob.cast::<PyTzInfo>()?;
 
         // Get the offset in seconds from the Python tzinfo
         let py_timedelta = ob.call_method1("utcoffset", (PyNone::get(ob.py()),))?;
@@ -386,6 +433,9 @@ impl<'py> IntoPyObject<'py> for OffsetDateTime {
     type Target = PyDateTime;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = PyDateTime::TYPE_HINT;
 
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let date = self.date();
@@ -412,17 +462,22 @@ impl<'py> IntoPyObject<'py> for OffsetDateTime {
             minute,
             second,
             microsecond,
-            Some(py_tzinfo.downcast()?),
+            Some(py_tzinfo.cast()?),
         )
     }
 }
 
-impl FromPyObject<'_> for OffsetDateTime {
-    fn extract_bound(ob: &Bound<'_, PyAny>) -> PyResult<OffsetDateTime> {
+impl FromPyObject<'_, '_> for OffsetDateTime {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr = PyDateTime::TYPE_HINT;
+
+    fn extract(ob: Borrowed<'_, '_, PyAny>) -> Result<Self, Self::Error> {
         let offset: UtcOffset = {
             #[cfg(not(Py_LIMITED_API))]
             {
-                let dt = ob.downcast::<PyDateTime>()?;
+                let dt = ob.cast::<PyDateTime>()?;
                 let tzinfo = dt.get_tzinfo().ok_or_else(|| {
                     PyTypeError::new_err("expected a datetime with non-None tzinfo")
                 })?;
@@ -440,7 +495,7 @@ impl FromPyObject<'_> for OffsetDateTime {
             }
         };
 
-        let (date, time) = extract_date_time(ob)?;
+        let (date, time) = extract_date_time(&ob)?;
 
         let primitive_dt = PrimitiveDateTime::new(date, time);
         Ok(primitive_dt.assume_offset(offset))
@@ -451,6 +506,9 @@ impl<'py> IntoPyObject<'py> for UtcDateTime {
     type Target = PyDateTime;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = PyDateTime::TYPE_HINT;
 
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let date = self.date();
@@ -480,12 +538,17 @@ impl<'py> IntoPyObject<'py> for UtcDateTime {
     }
 }
 
-impl FromPyObject<'_> for UtcDateTime {
-    fn extract_bound(ob: &Bound<'_, PyAny>) -> PyResult<UtcDateTime> {
+impl FromPyObject<'_, '_> for UtcDateTime {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr = PyDateTime::TYPE_HINT;
+
+    fn extract(ob: Borrowed<'_, '_, PyAny>) -> Result<Self, Self::Error> {
         let tzinfo = {
             #[cfg(not(Py_LIMITED_API))]
             {
-                let dt = ob.downcast::<PyDateTime>()?;
+                let dt = ob.cast::<PyDateTime>()?;
                 dt.get_tzinfo().ok_or_else(|| {
                     PyTypeError::new_err("expected a datetime with non-None tzinfo")
                 })?
@@ -512,7 +575,7 @@ impl FromPyObject<'_> for UtcDateTime {
             ));
         }
 
-        let (date, time) = extract_date_time(ob)?;
+        let (date, time) = extract_date_time(&ob)?;
         let primitive_dt = PrimitiveDateTime::new(date, time);
         Ok(primitive_dt.assume_utc().into())
     }
@@ -680,7 +743,7 @@ mod tests {
             (year, month, day, hour, minute, second, microsecond)
         }
 
-        #[allow(clippy::too_many_arguments)]
+        #[expect(clippy::too_many_arguments)]
         pub(crate) fn create_primitive_date_time_from_py(
             py: Python<'_>,
             year: u32,

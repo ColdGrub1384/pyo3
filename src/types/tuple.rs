@@ -1,16 +1,29 @@
 use crate::ffi::{self, Py_ssize_t};
 use crate::ffi_ptr_ext::FfiPtrExt;
 #[cfg(feature = "experimental-inspect")]
-use crate::inspect::types::TypeInfo;
+use crate::inspect::{type_hint_subscript, PyStaticExpr};
 use crate::instance::Borrowed;
 use crate::internal_tricks::get_ssize_index;
-use crate::types::{any::PyAnyMethods, sequence::PySequenceMethods, PyList, PySequence};
+#[cfg(feature = "experimental-inspect")]
+use crate::type_object::PyTypeInfo;
+use crate::types::{sequence::PySequenceMethods, PyList, PySequence};
+#[cfg(all(
+    not(any(PyPy, GraalPy)),
+    any(all(Py_3_9, not(Py_LIMITED_API)), Py_3_12)
+))]
+use crate::BoundObject;
 use crate::{
     exceptions, Bound, FromPyObject, IntoPyObject, IntoPyObjectExt, PyAny, PyErr, PyResult, Python,
 };
 use std::iter::FusedIterator;
 #[cfg(feature = "nightly")]
 use std::num::NonZero;
+
+#[cfg(all(
+    not(any(PyPy, GraalPy)),
+    any(all(Py_3_9, not(Py_LIMITED_API)), Py_3_12)
+))]
+use libc::size_t;
 
 #[inline]
 #[track_caller]
@@ -29,7 +42,7 @@ fn try_new_from_iter<'py>(
 
         // - Panics if the ptr is null
         // - Cleans up the tuple if `convert` or the asserts panic
-        let tup = ptr.assume_owned(py).downcast_into_unchecked();
+        let tup = ptr.assume_owned(py).cast_into_unchecked();
 
         let mut counter: Py_ssize_t = 0;
 
@@ -58,14 +71,17 @@ fn try_new_from_iter<'py>(
 #[repr(transparent)]
 pub struct PyTuple(PyAny);
 
-pyobject_native_type_core!(PyTuple, pyobject_native_static_type_object!(ffi::PyTuple_Type), #checkfunction=ffi::PyTuple_Check);
+pyobject_native_type_core!(PyTuple, pyobject_native_static_type_object!(ffi::PyTuple_Type), "builtins", "tuple", #checkfunction=ffi::PyTuple_Check);
 
 impl PyTuple {
     /// Constructs a new tuple with the given elements.
     ///
-    /// If you want to create a [`PyTuple`] with elements of different or unknown types, or from an
-    /// iterable that doesn't implement [`ExactSizeIterator`], create a Rust tuple with the given
-    /// elements and convert it at once using `into_py`.
+    /// If you want to create a [`PyTuple`] with elements of different or unknown types, create a Rust
+    /// tuple with the given elements and convert it at once using [`into_pyobject()`][crate::IntoPyObject].
+    /// (`IntoPyObject` is implemented for tuples of up to 12 elements.)
+    ///
+    /// To create a [`PyTuple`] from an iterable that doesn't implement [`ExactSizeIterator`],
+    /// collect the elements into a `Vec` first.
     ///
     /// # Examples
     ///
@@ -78,6 +94,10 @@ impl PyTuple {
     ///     let elements: Vec<i32> = vec![0, 1, 2, 3, 4, 5];
     ///     let tuple = PyTuple::new(py, elements)?;
     ///     assert_eq!(format!("{:?}", tuple), "(0, 1, 2, 3, 4, 5)");
+    ///
+    ///     // alternative using `into_pyobject()`
+    ///     let tuple = (0, "hello", true).into_pyobject(py)?;
+    ///     assert_eq!(format!("{:?}", tuple), "(0, 'hello', True)");
     /// # Ok(())
     /// })
     /// # }
@@ -103,11 +123,7 @@ impl PyTuple {
 
     /// Constructs an empty tuple (on the Python side, a singleton object).
     pub fn empty(py: Python<'_>) -> Bound<'_, PyTuple> {
-        unsafe {
-            ffi::PyTuple_New(0)
-                .assume_owned(py)
-                .downcast_into_unchecked()
-        }
+        unsafe { ffi::PyTuple_New(0).assume_owned(py).cast_into_unchecked() }
     }
 }
 
@@ -156,11 +172,16 @@ pub trait PyTupleMethods<'py>: crate::sealed::Sealed {
     /// by avoiding a reference count change.
     fn get_borrowed_item<'a>(&'a self, index: usize) -> PyResult<Borrowed<'a, 'py, PyAny>>;
 
-    /// Gets the tuple item at the specified index. Undefined behavior on bad index. Use with caution.
+    /// Gets the tuple item at the specified index. Undefined behavior on bad index, or if the tuple
+    /// contains a null pointer at the specified index. Use with caution.
     ///
     /// # Safety
     ///
-    /// Caller must verify that the index is within the bounds of the tuple.
+    /// - Caller must verify that the index is within the bounds of the tuple.
+    /// - A null pointer is only legal in a tuple which is in the process of being initialized, callers
+    ///   can typically assume the tuple item is non-null unless they are knowingly filling an
+    ///   uninitialized tuple. (If a tuple were to contain a null pointer element, accessing it from Python
+    ///   typically causes a segfault.)
     #[cfg(not(any(Py_LIMITED_API, PyPy, GraalPy)))]
     unsafe fn get_item_unchecked(&self, index: usize) -> Bound<'py, PyAny>;
 
@@ -169,7 +190,7 @@ pub trait PyTupleMethods<'py>: crate::sealed::Sealed {
     ///
     /// # Safety
     ///
-    /// Caller must verify that the index is within the bounds of the tuple.
+    /// See [`get_item_unchecked`][PyTupleMethods::get_item_unchecked].
     #[cfg(not(any(Py_LIMITED_API, PyPy, GraalPy)))]
     unsafe fn get_borrowed_item_unchecked<'a>(&'a self, index: usize) -> Borrowed<'a, 'py, PyAny>;
 
@@ -221,18 +242,18 @@ impl<'py> PyTupleMethods<'py> for Bound<'py, PyTuple> {
     }
 
     fn as_sequence(&self) -> &Bound<'py, PySequence> {
-        unsafe { self.downcast_unchecked() }
+        unsafe { self.cast_unchecked() }
     }
 
     fn into_sequence(self) -> Bound<'py, PySequence> {
-        unsafe { self.into_any().downcast_into_unchecked() }
+        unsafe { self.cast_into_unchecked() }
     }
 
     fn get_slice(&self, low: usize, high: usize) -> Bound<'py, PyTuple> {
         unsafe {
             ffi::PyTuple_GetSlice(self.as_ptr(), get_ssize_index(low), get_ssize_index(high))
                 .assume_owned(self.py())
-                .downcast_into_unchecked()
+                .cast_into_unchecked()
         }
     }
 
@@ -301,10 +322,15 @@ impl<'a, 'py> Borrowed<'a, 'py, PyTuple> {
         }
     }
 
+    /// # Safety
+    ///
+    /// See `get_item_unchecked` in `PyTupleMethods`.
     #[cfg(not(any(Py_LIMITED_API, PyPy, GraalPy)))]
     unsafe fn get_borrowed_item_unchecked(self, index: usize) -> Borrowed<'a, 'py, PyAny> {
+        // SAFETY: caller has upheld the safety contract
         unsafe {
-            ffi::PyTuple_GET_ITEM(self.as_ptr(), index as Py_ssize_t).assume_borrowed(self.py())
+            ffi::PyTuple_GET_ITEM(self.as_ptr(), index as Py_ssize_t)
+                .assume_borrowed_unchecked(self.py())
         }
     }
 
@@ -580,7 +606,7 @@ impl ExactSizeIterator for BorrowedTupleIterator<'_, '_> {
 impl FusedIterator for BorrowedTupleIterator<'_, '_> {}
 
 #[cold]
-fn wrong_tuple_length(t: &Bound<'_, PyTuple>, expected_length: usize) -> PyErr {
+fn wrong_tuple_length(t: Borrowed<'_, '_, PyTuple>, expected_length: usize) -> PyErr {
     let msg = format!(
         "expected tuple of length {}, but got tuple of length {}",
         expected_length,
@@ -598,32 +624,33 @@ macro_rules! tuple_conversion ({$length:expr,$(($refN:ident, $n:tt, $T:ident)),+
         type Output = Bound<'py, Self::Target>;
         type Error = PyErr;
 
+        #[cfg(feature = "experimental-inspect")]
+        const OUTPUT_TYPE: PyStaticExpr = type_hint_subscript!(
+            PyTuple::TYPE_HINT,
+            $($T::OUTPUT_TYPE),+
+        );
+
         fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
             Ok(array_into_tuple(py, [$(self.$n.into_bound_py_any(py)?),+]))
-        }
-
-        #[cfg(feature = "experimental-inspect")]
-        fn type_output() -> TypeInfo {
-            TypeInfo::Tuple(Some(vec![$( $T::type_output() ),+]))
         }
     }
 
     impl <'a, 'py, $($T),+> IntoPyObject<'py> for &'a ($($T,)+)
     where
         $(&'a $T: IntoPyObject<'py>,)+
-        $($T: 'a,)+ // MSRV
     {
         type Target = PyTuple;
         type Output = Bound<'py, Self::Target>;
         type Error = PyErr;
 
+        #[cfg(feature = "experimental-inspect")]
+        const OUTPUT_TYPE: PyStaticExpr = type_hint_subscript!(
+            PyTuple::TYPE_HINT,
+            $(<&$T>::OUTPUT_TYPE ),+
+        );
+
         fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
             Ok(array_into_tuple(py, [$(self.$n.into_bound_py_any(py)?),+]))
-        }
-
-        #[cfg(feature = "experimental-inspect")]
-        fn type_output() -> TypeInfo {
-            TypeInfo::Tuple(Some(vec![$( <&$T>::type_output() ),+]))
         }
     }
 
@@ -641,14 +668,14 @@ macro_rules! tuple_conversion ({$length:expr,$(($refN:ident, $n:tt, $T:ident)),+
         ) -> PyResult<Bound<'py, PyAny>> {
             let py = function.py();
             // We need this to drop the arguments correctly.
-            let args_bound = [$(self.$n.into_bound_py_any(py)?,)*];
+            let args_objects = ($(self.$n.into_pyobject_or_pyerr(py)?),*,);
             // Prepend one null argument for `PY_VECTORCALL_ARGUMENTS_OFFSET`.
-            let mut args = [std::ptr::null_mut(), $(args_bound[$n].as_ptr()),*];
+            let mut args = [std::ptr::null_mut(), $(args_objects.$n.as_ptr()),*];
             unsafe {
                 ffi::PyObject_VectorcallDict(
                     function.as_ptr(),
                     args.as_mut_ptr().add(1),
-                    $length + ffi::PY_VECTORCALL_ARGUMENTS_OFFSET,
+                    const { with_vectorcall_arguments_offset($length) },
                     kwargs.as_ptr(),
                 )
                 .assume_owned_or_err(py)
@@ -662,27 +689,26 @@ macro_rules! tuple_conversion ({$length:expr,$(($refN:ident, $n:tt, $T:ident)),+
             _: crate::call::private::Token,
         ) -> PyResult<Bound<'py, PyAny>> {
             let py = function.py();
-            // We need this to drop the arguments correctly.
-            let args_bound = [$(self.$n.into_bound_py_any(py)?,)*];
+            let args_objects = ($(self.$n.into_pyobject_or_pyerr(py)?),*,);
 
             #[cfg(not(Py_LIMITED_API))]
             if $length == 1 {
                 return unsafe {
                     ffi::PyObject_CallOneArg(
                        function.as_ptr(),
-                       args_bound[0].as_ptr()
+                       args_objects.0.as_ptr()
                     )
                     .assume_owned_or_err(py)
                 };
             }
 
             // Prepend one null argument for `PY_VECTORCALL_ARGUMENTS_OFFSET`.
-            let mut args = [std::ptr::null_mut(), $(args_bound[$n].as_ptr()),*];
+            let mut args = [std::ptr::null_mut(), $(args_objects.$n.as_ptr()),*];
             unsafe {
                 ffi::PyObject_Vectorcall(
                     function.as_ptr(),
                     args.as_mut_ptr().add(1),
-                    $length + ffi::PY_VECTORCALL_ARGUMENTS_OFFSET,
+                    const { with_vectorcall_arguments_offset($length) },
                     std::ptr::null_mut(),
                 )
                 .assume_owned_or_err(py)
@@ -697,28 +723,27 @@ macro_rules! tuple_conversion ({$length:expr,$(($refN:ident, $n:tt, $T:ident)),+
             _: crate::call::private::Token,
         ) -> PyResult<Bound<'py, PyAny>> {
             let py = object.py();
-            // We need this to drop the arguments correctly.
-            let args_bound = [$(self.$n.into_bound_py_any(py)?,)*];
+            let args_objects = ($(self.$n.into_pyobject_or_pyerr(py)?),*,);
 
             #[cfg(not(Py_LIMITED_API))]
             if $length == 1 {
                 return unsafe {
                     ffi::PyObject_CallMethodOneArg(
-                            object.as_ptr(),
-                            method_name.as_ptr(),
-                            args_bound[0].as_ptr(),
+                       object.as_ptr(),
+                       method_name.as_ptr(),
+                       args_objects.0.as_ptr()
                     )
                     .assume_owned_or_err(py)
                 };
             }
 
-            let mut args = [object.as_ptr(), $(args_bound[$n].as_ptr()),*];
+            let mut args = [object.as_ptr(), $(args_objects.$n.as_ptr()),*];
             unsafe {
                 ffi::PyObject_VectorcallMethod(
                     method_name.as_ptr(),
                     args.as_mut_ptr(),
                     // +1 for the receiver.
-                    1 + $length + ffi::PY_VECTORCALL_ARGUMENTS_OFFSET,
+                    const { with_vectorcall_arguments_offset(1 + $length) },
                     std::ptr::null_mut(),
                 )
                 .assume_owned_or_err(py)
@@ -756,11 +781,10 @@ macro_rules! tuple_conversion ({$length:expr,$(($refN:ident, $n:tt, $T:ident)),+
         }
     }
 
-    impl<'a, 'py, $($T),+> crate::call::private::Sealed for &'a ($($T,)+) where $(&'a $T: IntoPyObject<'py>,)+ $($T: 'a,)+ /*MSRV */ {}
+    impl<'a, 'py, $($T),+> crate::call::private::Sealed for &'a ($($T,)+) where $(&'a $T: IntoPyObject<'py>,)+ {}
     impl<'a, 'py, $($T),+> crate::call::PyCallArgs<'py> for &'a ($($T,)+)
     where
         $(&'a $T: IntoPyObject<'py>,)+
-        $($T: 'a,)+ // MSRV
     {
         #[cfg(all(Py_3_9, not(any(PyPy, GraalPy, Py_LIMITED_API))))]
         fn call(
@@ -770,15 +794,14 @@ macro_rules! tuple_conversion ({$length:expr,$(($refN:ident, $n:tt, $T:ident)),+
             _: crate::call::private::Token,
         ) -> PyResult<Bound<'py, PyAny>> {
             let py = function.py();
-            // We need this to drop the arguments correctly.
-            let args_bound = [$(self.$n.into_bound_py_any(py)?,)*];
+            let args_objects = ($(self.$n.into_pyobject_or_pyerr(py)?),*,);
             // Prepend one null argument for `PY_VECTORCALL_ARGUMENTS_OFFSET`.
-            let mut args = [std::ptr::null_mut(), $(args_bound[$n].as_ptr()),*];
+            let mut args = [std::ptr::null_mut(), $(args_objects.$n.as_ptr()),*];
             unsafe {
                 ffi::PyObject_VectorcallDict(
                     function.as_ptr(),
                     args.as_mut_ptr().add(1),
-                    $length + ffi::PY_VECTORCALL_ARGUMENTS_OFFSET,
+                    const { with_vectorcall_arguments_offset($length) },
                     kwargs.as_ptr(),
                 )
                 .assume_owned_or_err(py)
@@ -792,27 +815,26 @@ macro_rules! tuple_conversion ({$length:expr,$(($refN:ident, $n:tt, $T:ident)),+
             _: crate::call::private::Token,
         ) -> PyResult<Bound<'py, PyAny>> {
             let py = function.py();
-            // We need this to drop the arguments correctly.
-            let args_bound = [$(self.$n.into_bound_py_any(py)?,)*];
+            let args_objects = ($(self.$n.into_pyobject_or_pyerr(py)?),*,);
 
             #[cfg(not(Py_LIMITED_API))]
             if $length == 1 {
                 return unsafe {
                     ffi::PyObject_CallOneArg(
                        function.as_ptr(),
-                       args_bound[0].as_ptr()
+                       args_objects.0.as_ptr()
                     )
                     .assume_owned_or_err(py)
                 };
             }
 
             // Prepend one null argument for `PY_VECTORCALL_ARGUMENTS_OFFSET`.
-            let mut args = [std::ptr::null_mut(), $(args_bound[$n].as_ptr()),*];
+            let mut args = [std::ptr::null_mut(), $(args_objects.$n.as_ptr()),*];
             unsafe {
                 ffi::PyObject_Vectorcall(
                     function.as_ptr(),
                     args.as_mut_ptr().add(1),
-                    $length + ffi::PY_VECTORCALL_ARGUMENTS_OFFSET,
+                    const { with_vectorcall_arguments_offset($length) },
                     std::ptr::null_mut(),
                 )
                 .assume_owned_or_err(py)
@@ -827,8 +849,7 @@ macro_rules! tuple_conversion ({$length:expr,$(($refN:ident, $n:tt, $T:ident)),+
             _: crate::call::private::Token,
         ) -> PyResult<Bound<'py, PyAny>> {
             let py = object.py();
-            // We need this to drop the arguments correctly.
-            let args_bound = [$(self.$n.into_bound_py_any(py)?,)*];
+            let args_objects = ($(self.$n.into_pyobject_or_pyerr(py)?),*,);
 
             #[cfg(not(Py_LIMITED_API))]
             if $length == 1 {
@@ -836,19 +857,19 @@ macro_rules! tuple_conversion ({$length:expr,$(($refN:ident, $n:tt, $T:ident)),+
                     ffi::PyObject_CallMethodOneArg(
                             object.as_ptr(),
                             method_name.as_ptr(),
-                            args_bound[0].as_ptr(),
+                            args_objects.0.as_ptr(),
                     )
                     .assume_owned_or_err(py)
                 };
             }
 
-            let mut args = [object.as_ptr(), $(args_bound[$n].as_ptr()),*];
+            let mut args = [object.as_ptr(), $(args_objects.$n.as_ptr()),*];
             unsafe {
                 ffi::PyObject_VectorcallMethod(
                     method_name.as_ptr(),
                     args.as_mut_ptr(),
                     // +1 for the receiver.
-                    1 + $length + ffi::PY_VECTORCALL_ARGUMENTS_OFFSET,
+                    const { with_vectorcall_arguments_offset(1 + $length) },
                     std::ptr::null_mut(),
                 )
                 .assume_owned_or_err(py)
@@ -885,24 +906,27 @@ macro_rules! tuple_conversion ({$length:expr,$(($refN:ident, $n:tt, $T:ident)),+
         }
     }
 
-    impl<'py, $($T: FromPyObject<'py>),+> FromPyObject<'py> for ($($T,)+) {
-        fn extract_bound(obj: &Bound<'py, PyAny>) -> PyResult<Self>
+    impl<'a, 'py, $($T: FromPyObject<'a, 'py>),+> FromPyObject<'a, 'py> for ($($T,)+) {
+        type Error = PyErr;
+
+        #[cfg(feature = "experimental-inspect")]
+        const INPUT_TYPE: PyStaticExpr = type_hint_subscript!(
+            PyTuple::TYPE_HINT,
+            $($T::INPUT_TYPE ),+
+        );
+
+        fn extract(obj: Borrowed<'a, 'py, PyAny>) -> Result<Self, Self::Error>
         {
-            let t = obj.downcast::<PyTuple>()?;
+            let t = obj.cast::<PyTuple>()?;
             if t.len() == $length {
                 #[cfg(any(Py_LIMITED_API, PyPy, GraalPy))]
-                return Ok(($(t.get_borrowed_item($n)?.extract::<$T>()?,)+));
+                return Ok(($(t.get_borrowed_item($n)?.extract::<$T>().map_err(Into::into)?,)+));
 
                 #[cfg(not(any(Py_LIMITED_API, PyPy, GraalPy)))]
-                unsafe {return Ok(($(t.get_borrowed_item_unchecked($n).extract::<$T>()?,)+));}
+                unsafe {return Ok(($(t.get_borrowed_item_unchecked($n).extract::<$T>().map_err(Into::into)?,)+));}
             } else {
                 Err(wrong_tuple_length(t, $length))
             }
-        }
-
-        #[cfg(feature = "experimental-inspect")]
-        fn type_input() -> TypeInfo {
-            TypeInfo::Tuple(Some(vec![$( $T::type_input() ),+]))
         }
     }
 });
@@ -913,7 +937,7 @@ fn array_into_tuple<'py, const N: usize>(
 ) -> Bound<'py, PyTuple> {
     unsafe {
         let ptr = ffi::PyTuple_New(N.try_into().expect("0 < N <= 12"));
-        let tup = ptr.assume_owned(py).downcast_into_unchecked();
+        let tup = ptr.assume_owned(py).cast_into_unchecked();
         for (index, obj) in array.into_iter().enumerate() {
             #[cfg(not(any(Py_LIMITED_API, PyPy, GraalPy)))]
             ffi::PyTuple_SET_ITEM(ptr, index as ffi::Py_ssize_t, obj.into_ptr());
@@ -922,6 +946,18 @@ fn array_into_tuple<'py, const N: usize>(
         }
         tup
     }
+}
+
+/// Add `PY_VECTORCALL_ARGUMENTS_OFFSET` to the given number, checking for overflow at compile time.
+///
+/// Guarantees that we don't accidentally overflow a `size_t` should this get changed in the future.
+#[cfg(all(
+    not(any(PyPy, GraalPy)),
+    any(all(Py_3_9, not(Py_LIMITED_API)), Py_3_12)
+))]
+const fn with_vectorcall_arguments_offset(n: size_t) -> size_t {
+    n.checked_add(ffi::PY_VECTORCALL_ARGUMENTS_OFFSET)
+        .expect("overflow adding PY_VECTORCALL_ARGUMENTS_OFFSET")
 }
 
 tuple_conversion!(1, (ref0, 0, T0));
@@ -1055,7 +1091,7 @@ mod tests {
     fn test_len() {
         Python::attach(|py| {
             let ob = (1, 2, 3).into_pyobject(py).unwrap();
-            let tuple = ob.downcast::<PyTuple>().unwrap();
+            let tuple = ob.cast::<PyTuple>().unwrap();
             assert_eq!(3, tuple.len());
             assert!(!tuple.is_empty());
             let ob = tuple.as_any();
@@ -1087,7 +1123,7 @@ mod tests {
     fn test_iter() {
         Python::attach(|py| {
             let ob = (1, 2, 3).into_pyobject(py).unwrap();
-            let tuple = ob.downcast::<PyTuple>().unwrap();
+            let tuple = ob.cast::<PyTuple>().unwrap();
             assert_eq!(3, tuple.len());
             let mut iter = tuple.iter();
 
@@ -1111,7 +1147,7 @@ mod tests {
     fn test_iter_rev() {
         Python::attach(|py| {
             let ob = (1, 2, 3).into_pyobject(py).unwrap();
-            let tuple = ob.downcast::<PyTuple>().unwrap();
+            let tuple = ob.cast::<PyTuple>().unwrap();
             assert_eq!(3, tuple.len());
             let mut iter = tuple.iter().rev();
 
@@ -1181,7 +1217,7 @@ mod tests {
     fn test_into_iter() {
         Python::attach(|py| {
             let ob = (1, 2, 3).into_pyobject(py).unwrap();
-            let tuple = ob.downcast::<PyTuple>().unwrap();
+            let tuple = ob.cast::<PyTuple>().unwrap();
             assert_eq!(3, tuple.len());
 
             for (i, item) in tuple.iter().enumerate() {
@@ -1209,7 +1245,7 @@ mod tests {
     fn test_as_slice() {
         Python::attach(|py| {
             let ob = (1, 2, 3).into_pyobject(py).unwrap();
-            let tuple = ob.downcast::<PyTuple>().unwrap();
+            let tuple = ob.cast::<PyTuple>().unwrap();
 
             let slice = tuple.as_slice();
             assert_eq!(3, slice.len());
@@ -1291,7 +1327,7 @@ mod tests {
     fn test_tuple_get_item_invalid_index() {
         Python::attach(|py| {
             let ob = (1, 2, 3).into_pyobject(py).unwrap();
-            let tuple = ob.downcast::<PyTuple>().unwrap();
+            let tuple = ob.cast::<PyTuple>().unwrap();
             let obj = tuple.get_item(5);
             assert!(obj.is_err());
             assert_eq!(
@@ -1305,7 +1341,7 @@ mod tests {
     fn test_tuple_get_item_sanity() {
         Python::attach(|py| {
             let ob = (1, 2, 3).into_pyobject(py).unwrap();
-            let tuple = ob.downcast::<PyTuple>().unwrap();
+            let tuple = ob.cast::<PyTuple>().unwrap();
             let obj = tuple.get_item(0);
             assert_eq!(obj.unwrap().extract::<i32>().unwrap(), 1);
         });
@@ -1316,7 +1352,7 @@ mod tests {
     fn test_tuple_get_item_unchecked_sanity() {
         Python::attach(|py| {
             let ob = (1, 2, 3).into_pyobject(py).unwrap();
-            let tuple = ob.downcast::<PyTuple>().unwrap();
+            let tuple = ob.cast::<PyTuple>().unwrap();
             let obj = unsafe { tuple.get_item_unchecked(0) };
             assert_eq!(obj.extract::<i32>().unwrap(), 1);
         });
@@ -1326,7 +1362,7 @@ mod tests {
     fn test_tuple_contains() {
         Python::attach(|py| {
             let ob = (1, 1, 2, 3, 5, 8).into_pyobject(py).unwrap();
-            let tuple = ob.downcast::<PyTuple>().unwrap();
+            let tuple = ob.cast::<PyTuple>().unwrap();
             assert_eq!(6, tuple.len());
 
             let bad_needle = 7i32.into_pyobject(py).unwrap();
@@ -1344,7 +1380,7 @@ mod tests {
     fn test_tuple_index() {
         Python::attach(|py| {
             let ob = (1, 1, 2, 3, 5, 8).into_pyobject(py).unwrap();
-            let tuple = ob.downcast::<PyTuple>().unwrap();
+            let tuple = ob.cast::<PyTuple>().unwrap();
             assert_eq!(0, tuple.index(1i32).unwrap());
             assert_eq!(2, tuple.index(2i32).unwrap());
             assert_eq!(3, tuple.index(3i32).unwrap());
@@ -1407,6 +1443,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(panic = "unwind")]
     fn bad_intopyobject_doesnt_cause_leaks() {
         use crate::types::PyInt;
         use std::convert::Infallible;
@@ -1469,6 +1506,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(panic = "unwind")]
     fn bad_intopyobject_doesnt_cause_leaks_2() {
         use crate::types::PyInt;
         use std::convert::Infallible;

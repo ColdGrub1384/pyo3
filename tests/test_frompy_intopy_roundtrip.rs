@@ -6,8 +6,7 @@ use std::collections::HashMap;
 use std::hash::Hash;
 
 #[macro_use]
-#[path = "../src/tests/common.rs"]
-mod common;
+mod test_utils;
 
 #[derive(Debug, Clone, IntoPyObject, IntoPyObjectRef, FromPyObject)]
 pub struct A<'py> {
@@ -249,7 +248,7 @@ fn test_enum() {
         let foo = (&struct_var)
             .into_pyobject(py)
             .unwrap()
-            .downcast_into::<PyDict>()
+            .cast_into::<PyDict>()
             .unwrap();
         assert_eq!(struct_var, foo.extract::<Foo>().unwrap());
 
@@ -257,7 +256,7 @@ fn test_enum() {
             .clone()
             .into_pyobject(py)
             .unwrap()
-            .downcast_into::<PyDict>()
+            .cast_into::<PyDict>()
             .unwrap();
 
         assert_eq!(struct_var, foo.extract::<Foo>().unwrap());

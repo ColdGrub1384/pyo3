@@ -2,17 +2,16 @@
 
 use pyo3::prelude::*;
 
-#[path = "../src/tests/common.rs"]
-mod common;
+mod test_utils;
 
-#[pyclass(eq)]
+#[pyclass(eq, skip_from_py_object)]
 #[derive(Debug, Clone, PartialEq)]
 pub enum MyEnum {
     Variant,
     OtherVariant,
 }
 
-#[pyclass(eq, ord)]
+#[pyclass(eq, ord, skip_from_py_object)]
 #[derive(Debug, PartialEq, Eq, Clone, PartialOrd)]
 pub enum MyEnumOrd {
     Variant,
@@ -64,14 +63,14 @@ fn test_simple_enum_ord_comparable() {
     })
 }
 
-#[pyclass(eq, ord)]
+#[pyclass(eq, ord, skip_from_py_object)]
 #[derive(Debug, PartialEq, Eq, Clone, PartialOrd)]
 pub enum MyComplexEnumOrd {
     Variant(i32),
     OtherVariant(String),
 }
 
-#[pyclass(eq, ord)]
+#[pyclass(eq, ord, skip_from_py_object)]
 #[derive(Debug, PartialEq, Eq, Clone, PartialOrd)]
 pub enum MyComplexEnumOrd2 {
     Variant { msg: String, idx: u32 },
@@ -146,7 +145,7 @@ fn test_complex_enum_ord_comparable() {
     })
 }
 
-#[pyclass(eq, ord)]
+#[pyclass(eq, ord, skip_from_py_object)]
 #[derive(Debug, PartialEq, Eq, Clone, PartialOrd)]
 pub struct Point {
     x: i32,
@@ -171,7 +170,7 @@ fn test_struct_numeric_ord_comparable() {
     })
 }
 
-#[pyclass(eq, ord)]
+#[pyclass(eq, ord, skip_from_py_object)]
 #[derive(Debug, PartialEq, Eq, Clone, PartialOrd)]
 pub struct Person {
     surname: String,
@@ -223,7 +222,7 @@ fn test_struct_string_ord_comparable() {
     })
 }
 
-#[pyclass(eq, ord)]
+#[pyclass(eq, ord, skip_from_py_object)]
 #[derive(Debug, PartialEq, Eq, Clone)]
 pub struct Record {
     name: String,

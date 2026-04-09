@@ -1,11 +1,16 @@
 use crate::err::PyResult;
 use crate::ffi_ptr_ext::FfiPtrExt;
 use crate::py_result_ext::PyResultExt;
-use crate::types::any::PyAny;
-use crate::{ffi, Borrowed, Bound, BoundObject, IntoPyObject, IntoPyObjectExt};
-
 #[cfg(any(PyPy, GraalPy, Py_LIMITED_API))]
-use crate::type_object::PyTypeCheck;
+use crate::sync::PyOnceLock;
+use crate::types::any::PyAny;
+#[cfg(any(PyPy, GraalPy, Py_LIMITED_API))]
+use crate::types::typeobject::PyTypeMethods;
+#[cfg(any(PyPy, GraalPy, Py_LIMITED_API))]
+use crate::types::PyType;
+#[cfg(any(PyPy, GraalPy, Py_LIMITED_API))]
+use crate::Py;
+use crate::{ffi, Borrowed, Bound, BoundObject, IntoPyObject, IntoPyObjectExt};
 
 use super::PyWeakrefMethods;
 
@@ -16,7 +21,7 @@ use super::PyWeakrefMethods;
 pub struct PyWeakrefReference(PyAny);
 
 #[cfg(not(any(PyPy, GraalPy, Py_LIMITED_API)))]
-pyobject_subclassable_native_type!(PyWeakrefReference, crate::ffi::PyWeakReference);
+pyobject_subclassable_native_type!(PyWeakrefReference, ffi::PyWeakReference);
 
 #[cfg(not(any(PyPy, GraalPy, Py_LIMITED_API)))]
 pyobject_native_type!(
@@ -24,24 +29,27 @@ pyobject_native_type!(
     ffi::PyWeakReference,
     // TODO: should not be depending on a private symbol here!
     pyobject_native_static_type_object!(ffi::_PyWeakref_RefType),
+    "weakref",
+    "ReferenceType",
     #module=Some("weakref"),
-    #checkfunction=ffi::PyWeakref_CheckRefExact
+    #checkfunction=ffi::PyWeakref_CheckRef
 );
 
-// When targetting alternative or multiple interpreters, it is better to not use the internal API.
+// When targeting alternative or multiple interpreters, it is better to not use the internal API.
 #[cfg(any(PyPy, GraalPy, Py_LIMITED_API))]
-pyobject_native_type_named!(PyWeakrefReference);
-
-#[cfg(any(PyPy, GraalPy, Py_LIMITED_API))]
-impl PyTypeCheck for PyWeakrefReference {
-    const NAME: &'static str = "weakref.ReferenceType";
-    #[cfg(feature = "experimental-inspect")]
-    const PYTHON_TYPE: &'static str = "weakref.ReferenceType";
-
-    fn type_check(object: &Bound<'_, PyAny>) -> bool {
-        unsafe { ffi::PyWeakref_CheckRef(object.as_ptr()) > 0 }
-    }
-}
+pyobject_native_type_core!(
+    PyWeakrefReference,
+    |py| {
+        static TYPE: PyOnceLock<Py<PyType>> = PyOnceLock::new();
+        TYPE.import(py, "weakref", "ref")
+            .unwrap()
+            .as_type_ptr()
+    },
+    "weakref",
+    "ReferenceType",
+    #module=Some("weakref"),
+    #checkfunction=ffi::PyWeakref_CheckRef
+);
 
 impl PyWeakrefReference {
     /// Constructs a new Weak Reference (`weakref.ref`/`weakref.ReferenceType`) for the given object.
@@ -88,7 +96,7 @@ impl PyWeakrefReference {
                 object.py(),
                 ffi::PyWeakref_NewRef(object.as_ptr(), ffi::Py_None()),
             )
-            .downcast_into_unchecked()
+            .cast_into_unchecked()
         }
     }
 
@@ -116,13 +124,13 @@ impl PyWeakrefReference {
     /// fn callback(wref: Bound<'_, PyWeakrefReference>) -> PyResult<()> {
     ///         let py = wref.py();
     ///         assert!(wref.upgrade_as::<Foo>()?.is_none());
-    ///         py.run(c_str!("counter = 1"), None, None)
+    ///         py.run(c"counter = 1", None, None)
     /// }
     ///
     /// # fn main() -> PyResult<()> {
     /// Python::attach(|py| {
-    ///     py.run(c_str!("counter = 0"), None, None)?;
-    ///     assert_eq!(py.eval(c_str!("counter"), None, None)?.extract::<u32>()?, 0);
+    ///     py.run(c"counter = 0", None, None)?;
+    ///     assert_eq!(py.eval(c"counter", None, None)?.extract::<u32>()?, 0);
     ///     let foo = Bound::new(py, Foo{})?;
     ///
     ///     // This is fine.
@@ -132,7 +140,7 @@ impl PyWeakrefReference {
     ///         // In normal situations where a direct `Bound<'py, Foo>` is required use `upgrade::<Foo>`
     ///         weakref.upgrade().is_some_and(|obj| obj.is(&foo))
     ///     );
-    ///     assert_eq!(py.eval(c_str!("counter"), None, None)?.extract::<u32>()?, 0);
+    ///     assert_eq!(py.eval(c"counter", None, None)?.extract::<u32>()?, 0);
     ///
     ///     let weakref2 = PyWeakrefReference::new_with(&foo, wrap_pyfunction!(callback, py)?)?;
     ///     assert!(!weakref.is(&weakref2)); // Not the same weakref
@@ -141,7 +149,7 @@ impl PyWeakrefReference {
     ///     drop(foo);
     ///
     ///     assert!(weakref.upgrade_as::<Foo>()?.is_none());
-    ///     assert_eq!(py.eval(c_str!("counter"), None, None)?.extract::<u32>()?, 1);
+    ///     assert_eq!(py.eval(c"counter", None, None)?.extract::<u32>()?, 1);
     ///     Ok(())
     /// })
     /// # }
@@ -162,7 +170,7 @@ impl PyWeakrefReference {
                     object.py(),
                     ffi::PyWeakref_NewRef(object.as_ptr(), callback.as_ptr()),
                 )
-                .downcast_into_unchecked()
+                .cast_into_unchecked()
             }
         }
 
@@ -181,9 +189,9 @@ impl<'py> PyWeakrefMethods<'py> for Bound<'py, PyWeakrefReference> {
     fn upgrade(&self) -> Option<Bound<'py, PyAny>> {
         let mut obj: *mut ffi::PyObject = std::ptr::null_mut();
         match unsafe { ffi::compat::PyWeakref_GetRef(self.as_ptr(), &mut obj) } {
-            std::os::raw::c_int::MIN..=-1 => panic!("The 'weakref.ReferenceType' instance should be valid (non-null and actually a weakref reference)"),
+            std::ffi::c_int::MIN..=-1 => panic!("The 'weakref.ReferenceType' instance should be valid (non-null and actually a weakref reference)"),
             0 => None,
-            1..=std::os::raw::c_int::MAX => Some(unsafe { obj.assume_owned_unchecked(self.py()) }),
+            1..=std::ffi::c_int::MAX => Some(unsafe { obj.assume_owned_unchecked(self.py()) }),
         }
     }
 }
@@ -238,14 +246,13 @@ mod tests {
 
     mod python_class {
         use super::*;
-        use crate::ffi;
+        use crate::PyTypeInfo;
         use crate::{py_result_ext::PyResultExt, types::PyType};
         use std::ptr;
 
         fn get_type(py: Python<'_>) -> PyResult<Bound<'_, PyType>> {
-            py.run(ffi::c_str!("class A:\n    pass\n"), None, None)?;
-            py.eval(ffi::c_str!("A"), None, None)
-                .downcast_into::<PyType>()
+            py.run(c"class A:\n    pass\n", None, None)?;
+            py.eval(c"A", None, None).cast_into::<PyType>()
         }
 
         #[test]
@@ -373,9 +380,21 @@ mod tests {
                 Ok(())
             })
         }
+
+        #[test]
+        fn test_type_object() -> PyResult<()> {
+            Python::attach(|py| {
+                let class = get_type(py)?;
+                let object = class.call0()?;
+                let reference = PyWeakrefReference::new(&object)?;
+
+                assert!(reference.is_instance(&PyWeakrefReference::type_object(py))?);
+                Ok(())
+            })
+        }
     }
 
-    // under 'abi3-py37' and 'abi3-py38' PyClass cannot be weakreferencable.
+    // under 'abi3-py38' PyClass cannot be weakreferencable.
     #[cfg(all(feature = "macros", not(all(Py_LIMITED_API, not(Py_3_9)))))]
     mod pyo3_pyclass {
         use super::*;

@@ -1,3 +1,4 @@
+import io
 import json
 import os
 import re
@@ -5,11 +6,13 @@ import shutil
 import subprocess
 import sys
 import sysconfig
+import tarfile
 import tempfile
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from functools import lru_cache
 from glob import glob
 from pathlib import Path
+from shlex import quote
 from typing import (
     Any,
     Callable,
@@ -17,7 +20,9 @@ from typing import (
     Iterable,
     Iterator,
     List,
+    Literal,
     Optional,
+    Set,
     Tuple,
 )
 
@@ -31,7 +36,12 @@ except ImportError:
     except ImportError:
         toml = None
 
-nox.options.sessions = ["test", "clippy", "rustfmt", "ruff", "docs"]
+try:
+    import requests
+except ImportError:
+    requests = None
+
+nox.options.sessions = ["test", "clippy", "rustfmt", "ruff", "rumdl", "docs"]
 
 PYO3_DIR = Path(__file__).parent
 PYO3_TARGET = Path(os.environ.get("CARGO_TARGET_DIR", PYO3_DIR / "target")).absolute()
@@ -46,7 +56,7 @@ def _get_output(*args: str) -> str:
 
 
 def _parse_supported_interpreter_version(
-    python_impl: str,  # Literal["cpython", "pypy"], TODO update after 3.7 dropped
+    python_impl: Literal["cpython", "pypy"],
 ) -> Tuple[str, str]:
     output = _get_output("cargo", "metadata", "--format-version=1", "--no-deps")
     cargo_packages = json.loads(output)["packages"]
@@ -60,7 +70,7 @@ def _parse_supported_interpreter_version(
 
 
 def _supported_interpreter_versions(
-    python_impl: str,  # Literal["cpython", "pypy"], TODO update after 3.7 dropped
+    python_impl: Literal["cpython", "pypy"],
 ) -> List[str]:
     min_version, max_version = _parse_supported_interpreter_version(python_impl)
     major = int(min_version.split(".")[0])
@@ -70,11 +80,15 @@ def _supported_interpreter_versions(
     versions = [f"{major}.{minor}" for minor in range(min_minor, max_minor + 1)]
     # Add free-threaded builds for 3.13+
     if python_impl == "cpython":
-        versions += [f"{major}.{minor}t" for minor in range(13, max_minor + 1)]
+        versions += [f"{major}.{minor}t" for minor in range(14, max_minor + 1)]
     return versions
 
 
 PY_VERSIONS = _supported_interpreter_versions("cpython")
+# We don't yet support abi3-py315 but do support cp315 and cp315t
+# version-specific builds
+ABI3_PY_VERSIONS = [p for p in PY_VERSIONS if not p.endswith("t")]
+ABI3_PY_VERSIONS.remove("3.15")
 PYPY_VERSIONS = _supported_interpreter_versions("pypy")
 
 
@@ -102,7 +116,6 @@ def test_rust(session: nox.Session):
 
     for feature_set in _get_feature_sets():
         flags = extra_flags.copy()
-        print(feature_set)
 
         if feature_set is None or "full" not in feature_set:
             # doctests require at least the macros feature, which is
@@ -113,7 +126,7 @@ def test_rust(session: nox.Session):
 
         # We need to pass the feature set to the test command
         # so that it can be used in the test code
-        # (e.g. for `#[cfg(feature = "abi3-py37")]`)
+        # (e.g. for `#[cfg(feature = "abi3-py38")]`)
         if feature_set and "abi3" in feature_set and FREE_THREADED_BUILD:
             # free-threaded builds don't support abi3 yet
             continue
@@ -124,12 +137,12 @@ def test_rust(session: nox.Session):
             feature_set
             and "abi3" in feature_set
             and "full" in feature_set
-            and sys.version_info >= (3, 7)
+            and sys.version_info >= (3, 9)
         ):
-            # run abi3-py37 tests to check abi3 forward compatibility
+            # run abi3-py38 tests to check abi3 forward compatibility
             _run_cargo_test(
                 session,
-                features=feature_set.replace("abi3", "abi3-py37"),
+                features=feature_set.replace("abi3", "abi3-py38"),
                 extra_flags=flags,
             )
 
@@ -187,6 +200,7 @@ def generate_coverage_report(session: nox.Session) -> None:
 def rustfmt(session: nox.Session):
     _run_cargo(session, "fmt", "--all", "--check")
     _run_cargo(session, "fmt", _FFI_CHECK, "--all", "--check")
+    _format_ffi_extern(session, check=True)
 
 
 @nox.session(name="ruff")
@@ -196,9 +210,20 @@ def ruff(session: nox.Session):
     _run(session, "ruff", "check", ".")
 
 
+@nox.session(name="rumdl", venv_backend="none")
+def rumdl(session: nox.Session):
+    """Run rumdl to check markdown formatting in the guide.
+
+    Can also run with uv directly, e.g. `uv run rumdl check guide`.
+    """
+    _run(
+        session, "uv", "run", "rumdl", "check", "guide", *session.posargs, external=True
+    )
+
+
 @nox.session(name="clippy", venv_backend="none")
 def clippy(session: nox.Session) -> bool:
-    if not _clippy(session) and _clippy_additional_workspaces(session):
+    if not (_clippy(session) and _clippy_additional_workspaces(session)):
         session.error("one or more jobs failed")
 
 
@@ -238,7 +263,6 @@ def _clippy_additional_workspaces(session: nox.Session) -> bool:
     target = os.environ.get("CARGO_BUILD_TARGET")
     if target is None or _get_rust_default_target() == target:
         try:
-            _build_docs_for_ffi_check(session)
             _run_cargo(session, "clippy", _FFI_CHECK, "--workspace", "--all-targets")
         except Exception:
             success = False
@@ -310,6 +334,7 @@ def publish(session: nox.Session) -> None:
     _run_cargo_publish(session, package="pyo3-macros")
     _run_cargo_publish(session, package="pyo3-ffi")
     _run_cargo_publish(session, package="pyo3")
+    _run_cargo_publish(session, package="pyo3-introspection")
 
 
 @nox.session(venv_backend="none")
@@ -414,39 +439,113 @@ def test_emscripten(session: nox.Session):
             f"-C link-arg={pythonlibdir}@/lib/python{info.pymajorminor}",
             f"-C link-arg=-lpython{info.pymajorminor}",
             "-C link-arg=-lexpat",
+            "-C link-arg=-lffi",
             "-C link-arg=-lmpdec",
-            "-C link-arg=-lsqlite3",
-            "-C link-arg=-lz",
-            "-C link-arg=-lbz2",
+            "-C link-arg=-lhacl",
+            "-C link-arg=-sUSE_SQLITE3",
+            "-C link-arg=-sUSE_ZLIB",
+            "-C link-arg=-sUSE_BZIP2",
+            "-C link-arg=-sEXPORTED_FUNCTIONS=_main,__PyRuntime",
             "-C link-arg=-sALLOW_MEMORY_GROWTH=1",
+            "-C link-arg=-sSTACK_SIZE=262144",
         ]
     )
+    session.env["RUSTDOCFLAGS"] = session.env["RUSTFLAGS"]
     session.env["CARGO_BUILD_TARGET"] = target
     session.env["PYO3_CROSS_LIB_DIR"] = pythonlibdir
     _run(session, "rustup", "target", "add", target, "--toolchain", "stable")
+
+    emsdk_env = next(info.builddir.glob("**/emsdk-cache/**/emsdk_env.sh"))
+
     _run(
         session,
         "bash",
         "-c",
-        f"source {info.builddir / 'emsdk/emsdk_env.sh'} && cargo test",
+        f"source {emsdk_env} && cargo test {' '.join(quote(arg) for arg in session.posargs)}",
+    )
+
+
+@nox.session(name="test-cross-compilation-windows")
+def test_cross_compilation_windows(session: nox.Session):
+    session.install("cargo-xwin")
+
+    env = os.environ.copy()
+    env["XWIN_ARCH"] = "x86_64"
+
+    # abi3
+    _run_cargo(
+        session,
+        "build",
+        "--manifest-path",
+        "examples/maturin-starter/Cargo.toml",
+        "--features",
+        "abi3",
+        "--target",
+        "x86_64-pc-windows-gnu",
+        env=env,
+    )
+    _run_cargo(
+        session,
+        "xwin",
+        "build",
+        "--cross-compiler",
+        "clang",
+        "--manifest-path",
+        "examples/maturin-starter/Cargo.toml",
+        "--features",
+        "abi3",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        env=env,
+    )
+
+    # non-abi3
+    env["PYO3_CROSS_PYTHON_VERSION"] = "3.13"
+    _run_cargo(
+        session,
+        "build",
+        "--manifest-path",
+        "examples/maturin-starter/Cargo.toml",
+        "--features",
+        "pyo3/generate-import-lib",
+        "--target",
+        "x86_64-pc-windows-gnu",
+        env=env,
+    )
+    _run_cargo(
+        session,
+        "xwin",
+        "build",
+        "--cross-compiler",
+        "clang",
+        "--manifest-path",
+        "examples/maturin-starter/Cargo.toml",
+        "--features",
+        "pyo3/generate-import-lib",
+        "--target",
+        "x86_64-pc-windows-msvc",
+        env=env,
     )
 
 
 @nox.session(venv_backend="none")
-def docs(session: nox.Session) -> None:
+def docs(session: nox.Session, nightly: bool = False, internal: bool = False) -> None:
     rustdoc_flags = ["-Dwarnings"]
     toolchain_flags = []
     cargo_flags = []
 
+    nightly = nightly or ("nightly" in session.posargs)
+    internal = internal or ("internal" in session.posargs)
+
     if "open" in session.posargs:
         cargo_flags.append("--open")
 
-    if "nightly" in session.posargs:
+    if nightly:
         rustdoc_flags.append("--cfg docsrs")
         toolchain_flags.append("+nightly")
         cargo_flags.extend(["-Z", "unstable-options", "-Z", "rustdoc-scrape-examples"])
 
-    if "nightly" in session.posargs and "internal" in session.posargs:
+    if internal:
         rustdoc_flags.append("--Z unstable-options")
         rustdoc_flags.append("--document-hidden-items")
         rustdoc_flags.extend(("--html-after-content", ".netlify/internal_banner.html"))
@@ -476,14 +575,155 @@ def docs(session: nox.Session) -> None:
 @nox.session(name="build-guide", venv_backend="none")
 def build_guide(session: nox.Session):
     shutil.rmtree(PYO3_GUIDE_TARGET, ignore_errors=True)
-    _run(session, "mdbook", "build", "-d", PYO3_GUIDE_TARGET, "guide", *session.posargs)
+    _run(
+        session,
+        "mdbook",
+        "build",
+        "-d",
+        str(PYO3_GUIDE_TARGET),
+        "guide",
+        *session.posargs,
+        external=True,
+    )
     for license in ("LICENSE-APACHE", "LICENSE-MIT"):
         target_file = PYO3_GUIDE_TARGET / license
         target_file.unlink(missing_ok=True)
         shutil.copy(PYO3_DIR / license, target_file)
 
 
-@nox.session(name="check-guide", venv_backend="none")
+@nox.session(name="build-netlify-site")
+def build_netlify_site(session: nox.Session):
+    # Remove netlify_build directory if it exists
+    netlify_build = Path("netlify_build")
+    if netlify_build.exists():
+        shutil.rmtree(netlify_build)
+
+    url = "https://github.com/PyO3/pyo3/archive/gh-pages.tar.gz"
+    response = requests.get(url, stream=True)
+    response.raise_for_status()
+    with tarfile.open(fileobj=io.BytesIO(response.content), mode="r:gz") as tar:
+        tar.extractall()
+    shutil.move("pyo3-gh-pages", "netlify_build")
+
+    preview = "--preview" in session.posargs
+    if preview:
+        session.posargs.remove("--preview")
+
+    session.install("towncrier")
+    # Save a copy of the changelog to restore later
+    changelog = (PYO3_DIR / "CHANGELOG.md").read_text()
+
+    # Build the changelog
+    session.run(
+        "towncrier", "build", "--keep", "--version", "Unreleased", "--date", "TBC"
+    )
+
+    # Build the guide
+    build_guide(session)
+    PYO3_GUIDE_TARGET.rename("netlify_build/main")
+
+    # Restore the original changelog
+    (PYO3_DIR / "CHANGELOG.md").write_text(changelog)
+    session.run("git", "restore", "--staged", "CHANGELOG.md", external=True)
+
+    # Build the main branch docs
+    docs(session)
+    PYO3_DOCS_TARGET.rename("netlify_build/main/doc")
+
+    # Build the internal docs
+    docs(session, nightly=True, internal=True)
+    (netlify_build / "internal").mkdir(parents=True, exist_ok=True)
+    PYO3_DOCS_TARGET.rename("netlify_build/internal/doc")
+
+    _build_netlify_redirects(preview)
+
+
+def _build_netlify_redirects(preview: bool) -> None:
+    current_version = os.environ.get("PYO3_VERSION")
+
+    with ExitStack() as stack:
+        redirects_file = stack.enter_context(open("netlify_build/_redirects", "w"))
+        headers_file = stack.enter_context(open("netlify_build/_headers", "w"))
+        for d in glob("netlify_build/v*"):
+            version = d.removeprefix("netlify_build/v")
+            redirects_file.write(
+                f"/v{version}/doc/* https://docs.rs/pyo3/{version}/:splat\n"
+            )
+
+            # for versions other than the current version, set noindex
+            if version != current_version:
+                headers_file.write(f"/v{version}/*\n  X-Robots-Tag: noindex\n")
+                continue
+
+            # for the current version, index all files and set canonical links where possible
+            for file in glob(f"{d}/**", recursive=True):
+                file_path = file.removeprefix("netlify_build")
+                url_path = _url_path_from_file_path(file_path)
+
+                for path in _url_and_file_paths(url_path, file_path):
+                    headers_file.write(
+                        f'{path}\n  Link: <https://pyo3.rs{url_path}>; rel="canonical"\n'
+                    )
+
+        # main files should be indexed and canonical
+        for file in glob("netlify_build/main/**", recursive=True):
+            file_path = file.removeprefix("netlify_build")
+            url_path = _url_path_from_file_path(file_path)
+
+            for path in _url_and_file_paths(url_path, file_path):
+                headers_file.write(
+                    f'{path}\n  Link: <https://pyo3.rs{url_path}>; rel="canonical"\n'
+                )
+
+        # for internal docs, set noindex for all files
+        headers_file.write("/internal/*\n  X-Robots-Tag: noindex\n")
+
+        # Add latest redirect
+        if current_version is not None:
+            redirects_file.write(f"/latest/* /v{current_version}/:splat 302\n")
+
+        # some backwards compatbiility redirects
+        redirects_file.write(
+            """\
+/latest/building_and_distribution/* /latest/building-and-distribution/:splat 302
+/latest/building_and_distribution/multiple_python_versions/* /latest/building-and-distribution/multiple-python-versions:splat 302
+/latest/function/error_handling/* /latest/function/error-handling/:splat 302
+/latest/getting_started/* /latest/getting-started/:splat 302
+/latest/python_from_rust/* /latest/python-from-rust/:splat 302
+/latest/python_typing_hints/* /latest/python-typing-hints/:splat 302
+/latest/trait_bounds/* /latest/trait-bounds/:splat 302
+"""
+        )
+
+        # Add landing page redirect
+        if preview:
+            redirects_file.write("/ /main/ 302\n")
+        else:
+            redirects_file.write(f"/ /v{current_version}/ 302\n")
+
+        # Add main doc redirect
+        redirects_file.write("/main/doc /main/doc/pyo3")
+
+
+def _url_path_from_file_path(file_path: str) -> str:
+    """Removes index.html and/or .html suffix to match the page URL on the final netlify site"""
+    url_path = file_path
+    if url_path.endswith("index.html"):
+        url_path = url_path[: -len("index.html")]
+    elif url_path.endswith(".html"):
+        url_path = url_path[: -len(".html")]
+    return url_path
+
+
+def _url_and_file_paths(url_path: str, file_path: str) -> Tuple[str, str]:
+    """Returns all combinations of url and file paths with and without index.html suffix"""
+    if url_path == file_path:
+        return (url_path,)
+    else:
+        return (url_path, file_path)
+
+
+@nox.session(name="check-guide")
 def check_guide(session: nox.Session):
     # reuse other sessions, but with default args
     posargs = [*session.posargs]
@@ -499,42 +739,70 @@ def check_guide(session: nox.Session):
     ]
 
     remaps = {
-        f"file://{PYO3_GUIDE_SRC}/([^/]*/)*?%7B%7B#PYO3_DOCS_URL}}}}": f"file://{PYO3_DOCS_TARGET}",
+        f"file://{PYO3_GUIDE_TARGET}/doc/": f"file://{PYO3_DOCS_TARGET}/",
+        "https://docs.rs/pyo3/latest/pyo3/": f"file://{PYO3_DOCS_TARGET}/pyo3/",
+        f"https://docs.rs/pyo3/v{pyo3_version}/": f"file://{PYO3_DOCS_TARGET}/",
+        f"https://pyo3.rs/v{pyo3_version}/doc/": f"file://{PYO3_DOCS_TARGET}/",
         f"https://pyo3.rs/v{pyo3_version}": f"file://{PYO3_GUIDE_TARGET}",
+        "https://pyo3.rs/main/doc$": f"file://{PYO3_DOCS_TARGET}/pyo3",
+        "https://pyo3.rs/main/doc/": f"file://{PYO3_DOCS_TARGET}/",
         "https://pyo3.rs/main/": f"file://{PYO3_GUIDE_TARGET}/",
+        "https://pyo3.rs/latest/doc/": f"file://{PYO3_DOCS_TARGET}/",
         "https://pyo3.rs/latest/": f"file://{PYO3_GUIDE_TARGET}/",
-        "%7B%7B#PYO3_DOCS_VERSION}}": "latest",
+        # bypass fragments for edge cases
+        # blob links
+        "(https://github.com/[^/]+/[^/]+/blob/[^#]+)#[a-zA-Z0-9._-]*": "$1",
+        # issue comments
+        "(https://github.com/[^/]+/[^/]+/issues/[0-9]+)#issuecomment-[0-9]*": "$1",
+        # rust docs
+        "(https://docs.rs/[^#]+)#[a-zA-Z0-9._-]*": "$1",
     }
-    remap_args = []
-    for key, value in remaps.items():
-        remap_args.extend(("--remap", f"{key} {value}"))
 
-    # check all links in the guide
-    _run(
-        session,
-        "lychee",
-        # FIXME: would be nice to use `--include-fragments` here, but we've had
-        # a lot of flaky failures from it - see https://github.com/lycheeverse/lychee/issues/1746
-        # "--include-fragments",
-        str(PYO3_GUIDE_SRC),
-        *remap_args,
-        "--accept=200,429",
-        *session.posargs,
-    )
-    # check external links in the docs
-    # (intra-doc links are checked by rustdoc)
-    _run(
-        session,
-        "lychee",
-        str(PYO3_DOCS_TARGET),
-        *remap_args,
-        f"--exclude=file://{PYO3_DOCS_TARGET}",
+    excludes = [
         # exclude some old http links from copyright notices, known to fail
-        "--exclude=http://www.adobe.com/",
-        "--exclude=http://www.nhncorp.com/",
+        "http://www.adobe.com/",
+        "http://www.nhncorp.com/",
+        # PR seems to be gone, possibly user deleted account?
+        "https://github.com/PyO3/pyo3/pull/938",
+    ]
+
+    common_args = (
+        *(f"--remap={key} {value}" for key, value in remaps.items()),
+        *(f"--exclude={arg}" for arg in excludes),
+        "--cache",
+        "--max-cache-age=7d",
+        "--cache-exclude-status=400..600",
         "--accept=200,429",
         *session.posargs,
     )
+
+    try:
+        # check all links in the guide
+        _run(
+            session,
+            "lychee",
+            "--include-fragments",
+            str(PYO3_GUIDE_TARGET),
+            f"--root-dir={PYO3_GUIDE_TARGET}",
+            *common_args,
+            external=True,
+        )
+        # check external links in the docs
+        # (intra-doc links are checked by rustdoc)
+        _run(
+            session,
+            "lychee",
+            str(PYO3_DOCS_TARGET),
+            # don't check intra-doc links, rustdoc already handled those
+            f"--exclude=file://{PYO3_DOCS_TARGET}",
+            *common_args,
+            external=True,
+        )
+    except nox.command.CommandFailed:
+        # on `main`, we ignore link check failures to allow the site to still be updated on push to main,
+        # we want to run the link checker on main to populate the GitHub actions cache so PRs run more reliably.
+        if os.environ.get("GITHUB_REF", "") != "refs/heads/main":
+            raise
 
 
 @nox.session(name="format-guide", venv_backend="none")
@@ -585,6 +853,131 @@ def format_guide(session: nox.Session):
             new_lines.append(prefix + "```\n")
 
         path.write_text("".join(new_lines))
+
+
+def _format_ffi_extern(session: nox.Session, *, check: bool = False):
+    """Format extern blocks inside extern_libpython! macros in pyo3-ffi.
+
+    rustfmt cannot format inside macro invocations, so this temporarily
+    replaces `extern_libpython!` with plain `extern "C"` blocks, runs rustfmt,
+    and then restores the macro invocations.
+
+    When check=True, errors out if any file would change (CI mode).
+    """
+    ffi_src = PYO3_DIR / "pyo3-ffi" / "src"
+    # Pattern for default ABI: `extern_libpython! {`
+    default_re = re.compile(r"^(\s*)extern_libpython!\s*\{", re.MULTILINE)
+    # Pattern for explicit ABI: `extern_libpython! { "C-unwind" {`
+    explicit_re = re.compile(
+        r'^(\s*)extern_libpython!\s*\{\s*"([^"]+)"\s*\{', re.MULTILINE
+    )
+    # Use #[doc] attributes as sentinels instead of /* */ comments to avoid
+    # rustfmt re-indenting them (rustfmt aligns block comments with nearby
+    # trailing comments, but leaves #[doc] attributes in place).
+    SENTINEL_DEFAULT = '#[doc = "__extern_libpython_default__"]'
+    SENTINEL_EXPLICIT = '#[doc = "__extern_libpython_explicit__:'
+    SENTINEL_EXPLICIT_CLOSE = "/* __extern_libpython_explicit_close__ */"
+
+    def replace_explicit(m):
+        indent = m.group(1)
+        abi = m.group(2)
+        return f'{indent}{SENTINEL_EXPLICIT}{abi}__"]\n{indent}extern "{abi}" {{'
+
+    def replace_default(m):
+        indent = m.group(1)
+        return f'{indent}{SENTINEL_DEFAULT}\n{indent}extern "C" {{'
+
+    # Pattern for the double closing brace of explicit ABI blocks:
+    # `extern_libpython! { "abi" { ... }}` has two closing braces, but after
+    # replacing the opening we only have one opening brace, so we need to
+    # remove the extra closing brace before running rustfmt.
+    explicit_close_re = re.compile(r"\}\}", re.MULTILINE)
+
+    originals = {}
+    files_to_format = []
+    for path in sorted(ffi_src.rglob("*.rs")):
+        if path.name == "macros.rs":
+            continue
+        content = path.read_text()
+        if "extern_libpython!" not in content:
+            continue
+
+        # Replace explicit ABI first (more specific pattern)
+        new_content = explicit_re.sub(replace_explicit, content)
+        # Fix double closing braces for explicit ABI blocks: the explicit
+        # pattern `extern_libpython! { "abi" { ... }}` has an outer `}` for
+        # the macro invocation that must be removed after we replaced the
+        # opening with a plain `extern "abi" {`.
+        if SENTINEL_EXPLICIT in new_content:
+            new_content = explicit_close_re.sub(
+                f"}} {SENTINEL_EXPLICIT_CLOSE}", new_content
+            )
+        # Replace default ABI
+        new_content = default_re.sub(replace_default, new_content)
+
+        if new_content != content:
+            originals[path] = content
+            path.write_text(new_content)
+            files_to_format.append(path)
+
+    if not files_to_format:
+        session.log("No extern_libpython! blocks found to format")
+        return
+
+    # Run rustfmt on the modified files
+    try:
+        _run(
+            session, "rustfmt", "--edition", "2021", *[str(f) for f in files_to_format]
+        )
+    except Exception:
+        # Restore originals on failure
+        for path, content in originals.items():
+            path.write_text(content)
+        raise
+
+    # Restore the macro invocations
+    sentinel_default_re = re.compile(
+        r'^(\s*)#\[doc = "__extern_libpython_default__"\]\n\s*extern "C" \{',
+        re.MULTILINE,
+    )
+    sentinel_explicit_re = re.compile(
+        r'^(\s*)#\[doc = "__extern_libpython_explicit__:([^_]+)__"\]\n\s*extern "[^"]*" \{',
+        re.MULTILINE,
+    )
+
+    changed = []
+    for path in files_to_format:
+        content = path.read_text()
+
+        content = sentinel_explicit_re.sub(
+            lambda m: f'{m.group(1)}extern_libpython! {{ "{m.group(2)}" {{', content
+        )
+        # Restore the double closing brace for explicit ABI blocks
+        content = content.replace(f"}} {SENTINEL_EXPLICIT_CLOSE}", "}}")
+        content = sentinel_default_re.sub(
+            lambda m: f"{m.group(1)}extern_libpython! {{", content
+        )
+
+        if check and content != originals[path]:
+            changed.append(path)
+            # Restore original so we don't leave dirty files in CI
+            path.write_text(originals[path])
+        else:
+            path.write_text(content)
+
+    if check and changed:
+        session.error(
+            "extern_libpython! blocks are not formatted:\n"
+            + "\n".join(f"  {p}" for p in changed)
+            + "\n\nRun `nox -s format-ffi-extern` to fix."
+        )
+
+    session.log(f"Formatted extern_libpython! blocks in {len(files_to_format)} files ✓")
+
+
+@nox.session(name="format-ffi-extern", venv_backend="none")
+def format_ffi_extern(session: nox.Session):
+    _format_ffi_extern(session)
 
 
 @nox.session(name="address-sanitizer", venv_backend="none")
@@ -718,8 +1111,8 @@ def set_msrv_package_versions(session: nox.Session):
 
 @nox.session(name="ffi-check")
 def ffi_check(session: nox.Session):
-    _build_docs_for_ffi_check(session)
     _run_cargo(session, "run", _FFI_CHECK)
+    _check_raw_dylib_macro(session)
 
 
 @nox.session(name="test-version-limits")
@@ -732,20 +1125,202 @@ def test_version_limits(session: nox.Session):
         config_file.set("CPython", "3.6")
         _run_cargo(session, "check", env=env, expect_error=True)
 
-        assert "3.15" not in PY_VERSIONS
-        config_file.set("CPython", "3.15")
+        assert "3.16" not in PY_VERSIONS
+        config_file.set("CPython", "3.16")
         _run_cargo(session, "check", env=env, expect_error=True)
 
-        # 3.15 CPython should build if abi3 is explicitly requested
+        # 3.16 CPython should build if abi3 is explicitly requested
         _run_cargo(session, "check", "--features=pyo3/abi3", env=env)
 
         # 3.15 CPython should build with forward compatibility
+        # TODO: check on 3.16 when adding abi3-py315 support
+        config_file.set("CPython", "3.15")
         env["PYO3_USE_ABI3_FORWARD_COMPATIBILITY"] = "1"
         _run_cargo(session, "check", env=env)
 
-        assert "3.8" not in PYPY_VERSIONS
-        config_file.set("PyPy", "3.8")
+        assert "3.10" not in PYPY_VERSIONS
+        config_file.set("PyPy", "3.10")
         _run_cargo(session, "check", env=env, expect_error=True)
+
+        # 3.13t is no longer supported
+        config_file.set("CPython", "3.13t")
+        _run_cargo(session, "check", env=env, expect_error=True)
+
+        # 3.14t is PyO3's minimum version of free-threaded Python
+        config_file.set("CPython", "3.14t")
+        _run_cargo(session, "check", env=env)
+
+    # attempt to build with latest version and check that abi3 version
+    # configured matches the feature
+    max_minor_version = max(int(v.split(".")[1]) for v in ABI3_PY_VERSIONS)
+    with tempfile.TemporaryFile() as stderr:
+        env = os.environ.copy()
+        env["PYO3_PRINT_CONFIG"] = "1"  # get diagnostics from the build
+        env["PYO3_NO_PYTHON"] = "1"  # isolate the build from local Python
+        _run_cargo(
+            session,
+            "check",
+            f"--features=pyo3/abi3-py3{max_minor_version}",
+            env=env,
+            stderr=stderr,
+            expect_error=True,
+        )
+        stderr.seek(0)
+        stderr = stderr.read().decode()
+    # NB if this assertion fails with something like
+    # "An abi3-py3* feature must be specified when compiling without a Python
+    # interpreter."
+    #
+    # then `ABI3_MAX_MINOR` in `pyo3-build-config/src/impl_.rs` is probably outdated.
+    assert f"version=3.{max_minor_version}" in stderr, (
+        f"Expected to see version=3.{max_minor_version}, got: \n\n{stderr}"
+    )
+
+
+def _check_raw_dylib_macro(session: nox.Session):
+    """Check that extern_libpython! macro covers all supported Python DLL names."""
+    min_version, max_version = _parse_supported_interpreter_version("cpython")
+    min_minor = int(min_version.split(".")[1])
+    max_minor = int(max_version.split(".")[1])
+
+    # Build the set of DLL names that default_lib_name_windows can produce
+    expected_dlls = {"python3", "python3_d"}
+    for minor in range(min_minor, max_minor + 1):
+        expected_dlls.add(f"python3{minor}")
+        expected_dlls.add(f"python3{minor}_d")
+        if minor >= 13:
+            expected_dlls.add(f"python3{minor}t")
+            expected_dlls.add(f"python3{minor}t_d")
+
+    # PyPy DLL names (libpypy3.X-c.dll)
+    pypy_min, pypy_max = _parse_supported_interpreter_version("pypy")
+    pypy_min_minor = int(pypy_min.split(".")[1])
+    pypy_max_minor = int(pypy_max.split(".")[1])
+    for minor in range(pypy_min_minor, pypy_max_minor + 1):
+        expected_dlls.add(f"libpypy3.{minor}-c")
+
+    # Parse the DLL name list in the extern_libpython!(@impl ...) invocation
+    lib_rs = (PYO3_DIR / "pyo3-ffi" / "src" / "impl_" / "macros.rs").read_text()
+    found_dlls = set(re.findall(r'"((?:python|libpypy)[^"]+)"', lib_rs))
+
+    missing = expected_dlls - found_dlls
+    extra = found_dlls - expected_dlls
+    errors = []
+    if missing:
+        errors.append(
+            f"Missing DLL names in extern_libpython! macro: {sorted(missing)}"
+        )
+    if extra:
+        errors.append(f"Extra DLL names in extern_libpython! macro: {sorted(extra)}")
+    if errors:
+        session.error(
+            "\n".join(errors)
+            + "\n\nUpdate the extern_libpython! macro in pyo3-ffi/src/impl_/macros.rs"
+            + " to match supported Python versions in pyo3-ffi/Cargo.toml"
+        )
+    session.log(
+        f"extern_libpython! macro covers all {len(expected_dlls)} expected DLL names ✓"
+    )
+
+    private_fn_allowlist = set(re.findall(r"\[\s*(_Py[A-Za-z0-9_]*)\s*\]", lib_rs))
+    required_private_fns = _raw_dylib_x86_private_functions()
+
+    missing = required_private_fns - private_fn_allowlist
+    extra = private_fn_allowlist - required_private_fns
+    errors = []
+    if missing:
+        errors.append(
+            "Missing x86 raw-dylib workaround entries for CPython private functions: "
+            f"{sorted(missing)}"
+        )
+    if extra:
+        errors.append(
+            "Unexpected x86 raw-dylib workaround entries for non-CPython/private functions: "
+            f"{sorted(extra)}"
+        )
+    if errors:
+        session.error(
+            "\n".join(errors)
+            + "\n\nUpdate extern_libpython_maybe_private_fn! in pyo3-ffi/src/impl_/macros.rs"
+            + " to match the CPython `_Py*` function imports declared via extern_libpython!."
+        )
+    session.log(
+        "extern_libpython_maybe_private_fn! covers all required x86 CPython"
+        f" private function imports ({len(required_private_fns)}) ✓"
+    )
+
+
+def _raw_dylib_x86_private_functions() -> Set[str]:
+    ffi_src = PYO3_DIR / "pyo3-ffi" / "src"
+    private_fns = set()
+    for path in ffi_src.rglob("*.rs"):
+        for block in _iter_extern_libpython_blocks(path.read_text()):
+            attrs: List[str] = []
+            for line in block.splitlines():
+                stripped = line.strip()
+                if stripped.startswith("#["):
+                    attrs.append(stripped)
+                    continue
+
+                match = re.search(r"\bfn\s+(_Py[A-Za-z0-9_]*)\b", stripped)
+                if match:
+                    if not any(
+                        _cfg_attr_is_non_cpython_only(attr)
+                        for attr in attrs
+                        if attr.startswith("#[cfg(")
+                    ):
+                        private_fns.add(match.group(1))
+                    attrs = []
+                    continue
+
+                if stripped and not stripped.startswith("//"):
+                    attrs = []
+
+    return private_fns
+
+
+def _iter_extern_libpython_blocks(source: str) -> Iterator[str]:
+    cursor = 0
+    while True:
+        start = source.find("extern_libpython!", cursor)
+        if start == -1:
+            return
+
+        block_start = source.find("{", start)
+        if block_start == -1:
+            return
+
+        depth = 0
+        for idx in range(block_start, len(source)):
+            if source[idx] == "{":
+                depth += 1
+            elif source[idx] == "}":
+                depth -= 1
+                if depth == 0:
+                    yield source[block_start + 1 : idx]
+                    cursor = idx + 1
+                    break
+        else:
+            return
+
+
+def _cfg_attr_is_non_cpython_only(attr: str) -> bool:
+    """Check if a #[cfg()] attribute targets only non-CPython implementations.
+
+    Functions behind #[cfg(PyPy)] or #[cfg(GraalPy)] are linked against the
+    PyPy/GraalPy runtime, not the CPython DLL, so they don't need the x86
+    raw-dylib underscore workaround.
+    """
+    match = re.fullmatch(r"#\[cfg\((.*)\)\]", attr)
+    if match is None:
+        return False
+
+    return bool(
+        re.fullmatch(
+            r"\s*(?:any\()?\s*(?:PyPy|GraalPy)\s*(?:,\s*(?:PyPy|GraalPy)\s*)*\)?\s*",
+            match.group(1),
+        )
+    )
 
 
 @nox.session(name="check-feature-powerset", venv_backend="none")
@@ -757,7 +1332,7 @@ def check_feature_powerset(session: nox.Session):
 
     # free-threaded builds do not support ABI3 (yet)
     EXPECTED_ABI3_FEATURES = {
-        f"abi3-py3{ver.split('.')[1]}" for ver in PY_VERSIONS if not ver.endswith("t")
+        f"abi3-py3{ver.split('.')[1]}" for ver in ABI3_PY_VERSIONS
     }
 
     EXCLUDED_FROM_FULL = {
@@ -854,28 +1429,33 @@ def update_ui_tests(session: nox.Session):
 def test_introspection(session: nox.Session):
     session.install("maturin")
     session.install("ruff")
+    options = []
     target = os.environ.get("CARGO_BUILD_TARGET")
-    for options in ([], ["--release"]):
-        if target is not None:
-            options += ("--target", target)
-        session.run_always("maturin", "develop", "-m", "./pytests/Cargo.toml", *options)
-        # We look for the built library
-        lib_file = None
-        for file in Path(session.virtualenv.location).rglob("pyo3_pytests.*"):
-            if file.is_file():
-                lib_file = str(file.resolve())
-        _run_cargo_test(
-            session,
-            package="pyo3-introspection",
-            env={"PYO3_PYTEST_LIB_PATH": lib_file},
-        )
-
-
-def _build_docs_for_ffi_check(session: nox.Session) -> None:
-    # pyo3-ffi-check needs to scrape docs of pyo3-ffi
-    env = os.environ.copy()
-    env["PYO3_PYTHON"] = sys.executable
-    _run_cargo(session, "doc", _FFI_CHECK, "-p", "pyo3-ffi", "--no-deps", env=env)
+    if target is not None:
+        options += ("--target", target)
+    profile = os.environ.get("CARGO_BUILD_PROFILE")
+    if profile == "release":
+        options.append("--release")
+    session.run_always(
+        "maturin",
+        "develop",
+        "-m",
+        "./pytests/Cargo.toml",
+        "--features",
+        "experimental-async,experimental-inspect",
+        *options,
+    )
+    lib_file = session.run(
+        "python",
+        "-c",
+        "import pyo3_pytests; print(pyo3_pytests.pyo3_pytests.__file__)",
+        silent=True,
+    ).strip()
+    _run_cargo_test(
+        session,
+        package="pyo3-introspection",
+        env={"PYO3_PYTEST_LIB_PATH": lib_file},
+    )
 
 
 @lru_cache()

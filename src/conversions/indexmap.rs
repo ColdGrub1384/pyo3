@@ -87,20 +87,28 @@
 //! # if another hash table was used, the order could be random
 //! ```
 
-use crate::conversion::IntoPyObject;
+use crate::conversion::{FromPyObjectOwned, IntoPyObject};
+#[cfg(feature = "experimental-inspect")]
+use crate::inspect::PyStaticExpr;
 use crate::types::*;
-use crate::{Bound, FromPyObject, PyErr, Python};
-use std::{cmp, hash};
+#[cfg(feature = "experimental-inspect")]
+use crate::{type_hint_subscript, PyTypeInfo};
+use crate::{Borrowed, Bound, FromPyObject, PyErr, Python};
+use std::hash;
 
 impl<'py, K, V, H> IntoPyObject<'py> for indexmap::IndexMap<K, V, H>
 where
-    K: IntoPyObject<'py> + cmp::Eq + hash::Hash,
+    K: IntoPyObject<'py> + Eq + hash::Hash,
     V: IntoPyObject<'py>,
     H: hash::BuildHasher,
 {
     type Target = PyDict;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr =
+        type_hint_subscript!(PyDict::TYPE_HINT, K::OUTPUT_TYPE, V::OUTPUT_TYPE);
 
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let dict = PyDict::new(py);
@@ -113,13 +121,17 @@ where
 
 impl<'a, 'py, K, V, H> IntoPyObject<'py> for &'a indexmap::IndexMap<K, V, H>
 where
-    &'a K: IntoPyObject<'py> + cmp::Eq + hash::Hash,
+    &'a K: IntoPyObject<'py> + Eq + hash::Hash,
     &'a V: IntoPyObject<'py>,
     H: hash::BuildHasher,
 {
     type Target = PyDict;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr =
+        type_hint_subscript!(PyDict::TYPE_HINT, <&K>::OUTPUT_TYPE, <&V>::OUTPUT_TYPE);
 
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let dict = PyDict::new(py);
@@ -130,17 +142,26 @@ where
     }
 }
 
-impl<'py, K, V, S> FromPyObject<'py> for indexmap::IndexMap<K, V, S>
+impl<'py, K, V, S> FromPyObject<'_, 'py> for indexmap::IndexMap<K, V, S>
 where
-    K: FromPyObject<'py> + cmp::Eq + hash::Hash,
-    V: FromPyObject<'py>,
+    K: FromPyObjectOwned<'py> + Eq + hash::Hash,
+    V: FromPyObjectOwned<'py>,
     S: hash::BuildHasher + Default,
 {
-    fn extract_bound(ob: &Bound<'py, PyAny>) -> Result<Self, PyErr> {
-        let dict = ob.downcast::<PyDict>()?;
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr =
+        type_hint_subscript!(PyDict::TYPE_HINT, K::INPUT_TYPE, V::INPUT_TYPE);
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> Result<Self, Self::Error> {
+        let dict = ob.cast::<PyDict>()?;
         let mut ret = indexmap::IndexMap::with_capacity_and_hasher(dict.len(), S::default());
-        for (k, v) in dict {
-            ret.insert(k.extract()?, v.extract()?);
+        for (k, v) in dict.iter() {
+            ret.insert(
+                k.extract().map_err(Into::into)?,
+                v.extract().map_err(Into::into)?,
+            );
         }
         Ok(ret)
     }
@@ -160,7 +181,7 @@ mod test_indexmap {
 
             let py_map = (&map).into_pyobject(py).unwrap();
 
-            assert!(py_map.len() == 1);
+            assert_eq!(py_map.len(), 1);
             assert!(
                 py_map
                     .get_item(1)

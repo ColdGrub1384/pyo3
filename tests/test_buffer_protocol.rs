@@ -8,13 +8,12 @@ use pyo3::ffi;
 use pyo3::prelude::*;
 use pyo3::types::IntoPyDict;
 use std::ffi::CString;
-use std::os::raw::{c_int, c_void};
+use std::ffi::{c_int, c_void};
 use std::ptr;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-#[path = "../src/tests/common.rs"]
-mod common;
+mod test_utils;
 
 #[pyclass]
 struct TestBufferClass {
@@ -96,10 +95,9 @@ fn test_buffer_referenced() {
 }
 
 #[test]
-#[cfg(all(Py_3_8, not(Py_GIL_DISABLED)))] // sys.unraisablehook not available until Python 3.8
 fn test_releasebuffer_unraisable_error() {
-    use common::UnraisableCapture;
     use pyo3::exceptions::PyValueError;
+    use test_utils::UnraisableCapture;
 
     #[pyclass]
     struct ReleaseBufferError {}
@@ -121,20 +119,20 @@ fn test_releasebuffer_unraisable_error() {
     }
 
     Python::attach(|py| {
-        let capture = UnraisableCapture::install(py);
-
         let instance = Py::new(py, ReleaseBufferError {}).unwrap();
-        let env = [("ob", instance.clone_ref(py))].into_py_dict(py).unwrap();
 
-        assert!(capture.borrow(py).capture.is_none());
+        let (err, object) = UnraisableCapture::enter(py, |capture| {
+            let env = [("ob", instance.clone_ref(py))].into_py_dict(py).unwrap();
 
-        py_assert!(py, *env, "bytes(ob) == b'hello world'");
+            assert!(capture.take_capture().is_none());
 
-        let (err, object) = capture.borrow_mut(py).capture.take().unwrap();
+            py_assert!(py, *env, "bytes(ob) == b'hello world'");
+
+            capture.take_capture().unwrap()
+        });
+
         assert_eq!(err.to_string(), "ValueError: oh dear");
         assert!(object.is(&instance));
-
-        capture.borrow_mut(py).uninstall(py);
     });
 }
 

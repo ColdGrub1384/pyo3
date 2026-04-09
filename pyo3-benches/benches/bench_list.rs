@@ -85,7 +85,7 @@ fn sequence_from_list(b: &mut Bencher<'_>) {
     Python::attach(|py| {
         const LEN: usize = 50_000;
         let list = &PyList::new(py, 0..LEN).unwrap();
-        b.iter(|| black_box(list).downcast::<PySequence>().unwrap());
+        b.iter(|| black_box(list).cast::<PySequence>().unwrap());
     });
 }
 
@@ -95,7 +95,7 @@ fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("list_nth", list_nth);
     c.bench_function("list_nth_back", list_nth_back);
     c.bench_function("list_get_item", list_get_item);
-    #[cfg(not(any(Py_LIMITED_API, Py_GIL_DISABLED)))]
+    #[cfg(not(Py_LIMITED_API))]
     c.bench_function("list_get_item_unchecked", list_get_item_unchecked);
     c.bench_function("sequence_from_list", sequence_from_list);
 }

@@ -1,6 +1,10 @@
+#![warn(clippy::undocumented_unsafe_blocks)]
+
 use std::{convert::Infallible, marker::PhantomData, ops::Deref};
 
-use crate::{ffi, types::PyNone, Bound, IntoPyObject, IntoPyObjectExt, PyObject, PyResult, Python};
+use crate::{
+    ffi, types::PyNone, Bound, IntoPyObject, IntoPyObjectExt, Py, PyAny, PyResult, Python,
+};
 
 /// Used to wrap values in `Option<T>` for default arguments.
 pub trait SomeWrap<T> {
@@ -19,18 +23,17 @@ impl<T> SomeWrap<T> for Option<T> {
     }
 }
 
-// Hierarchy of conversions used in the `IntoPy` implementation
+// Hierarchy of conversions used in the function return type machinery
 pub struct Converter<T>(EmptyTupleConverter<T>);
 pub struct EmptyTupleConverter<T>(IntoPyObjectConverter<T>);
-pub struct IntoPyObjectConverter<T>(IntoPyConverter<T>);
-pub struct IntoPyConverter<T>(UnknownReturnResultType<T>);
+pub struct IntoPyObjectConverter<T>(UnknownReturnResultType<T>);
 pub struct UnknownReturnResultType<T>(UnknownReturnType<T>);
 pub struct UnknownReturnType<T>(PhantomData<T>);
 
 pub fn converter<T>(_: &T) -> Converter<T> {
-    Converter(EmptyTupleConverter(IntoPyObjectConverter(IntoPyConverter(
+    Converter(EmptyTupleConverter(IntoPyObjectConverter(
         UnknownReturnResultType(UnknownReturnType(PhantomData)),
-    ))))
+    )))
 }
 
 impl<T> Deref for Converter<T> {
@@ -48,13 +51,6 @@ impl<T> Deref for EmptyTupleConverter<T> {
 }
 
 impl<T> Deref for IntoPyObjectConverter<T> {
-    type Target = IntoPyConverter<T>;
-    fn deref(&self) -> &Self::Target {
-        &self.0
-    }
-}
-
-impl<T> Deref for IntoPyConverter<T> {
     type Target = UnknownReturnResultType<T>;
     fn deref(&self) -> &Self::Target {
         &self.0
@@ -73,6 +69,11 @@ impl EmptyTupleConverter<PyResult<()>> {
     pub fn map_into_ptr(&self, py: Python<'_>, obj: PyResult<()>) -> PyResult<*mut ffi::PyObject> {
         obj.map(|_| PyNone::get(py).to_owned().into_ptr())
     }
+
+    #[inline]
+    pub fn map_into_pyobject(&self, py: Python<'_>, obj: PyResult<()>) -> PyResult<Py<PyAny>> {
+        obj.map(|_| PyNone::get(py).to_owned().into_any().unbind())
+    }
 }
 
 impl<'py, T: IntoPyObject<'py>> IntoPyObjectConverter<T> {
@@ -89,7 +90,7 @@ impl<'py, T: IntoPyObject<'py>, E> IntoPyObjectConverter<Result<T, E>> {
     }
 
     #[inline]
-    pub fn map_into_pyobject(&self, py: Python<'py>, obj: PyResult<T>) -> PyResult<PyObject>
+    pub fn map_into_pyobject(&self, py: Python<'py>, obj: PyResult<T>) -> PyResult<Py<PyAny>>
     where
         T: IntoPyObject<'py>,
     {
@@ -126,7 +127,7 @@ impl<T> UnknownReturnType<T> {
     }
 
     #[inline]
-    pub fn map_into_pyobject<'py>(&self, _: Python<'py>, _: PyResult<T>) -> PyResult<PyObject>
+    pub fn map_into_pyobject<'py>(&self, _: Python<'py>, _: PyResult<T>) -> PyResult<Py<PyAny>>
     where
         T: IntoPyObject<'py>,
     {

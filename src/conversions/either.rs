@@ -29,7 +29,7 @@
 //! use pyo3::{Python, PyResult, IntoPyObject, types::PyAnyMethods};
 //!
 //! fn main() -> PyResult<()> {
-//!     pyo3::prepare_freethreaded_python();
+//!     Python::initialize();
 //!     Python::attach(|py| {
 //!         // Create a string and an int in Python.
 //!         let py_str = "crab".into_pyobject(py)?;
@@ -45,10 +45,12 @@
 //! [either](https://docs.rs/either/ "A library for easy idiomatic error handling and reporting in Rust applications")’s
 
 #[cfg(feature = "experimental-inspect")]
-use crate::inspect::types::TypeInfo;
+use crate::inspect::PyStaticExpr;
+#[cfg(feature = "experimental-inspect")]
+use crate::type_hint_union;
 use crate::{
-    exceptions::PyTypeError, types::any::PyAnyMethods, Bound, FromPyObject, IntoPyObject,
-    IntoPyObjectExt, PyAny, PyErr, PyResult, Python,
+    exceptions::PyTypeError, Borrowed, Bound, FromPyObject, IntoPyObject, IntoPyObjectExt, PyAny,
+    PyErr, Python,
 };
 use either::Either;
 
@@ -61,6 +63,9 @@ where
     type Target = PyAny;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = type_hint_union!(L::OUTPUT_TYPE, R::OUTPUT_TYPE);
 
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         match self {
@@ -80,6 +85,9 @@ where
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = type_hint_union!(<&L>::OUTPUT_TYPE, <&R>::OUTPUT_TYPE);
+
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         match self {
             Either::Left(l) => l.into_bound_py_any(py),
@@ -89,13 +97,18 @@ where
 }
 
 #[cfg_attr(docsrs, doc(cfg(feature = "either")))]
-impl<'py, L, R> FromPyObject<'py> for Either<L, R>
+impl<'a, 'py, L, R> FromPyObject<'a, 'py> for Either<L, R>
 where
-    L: FromPyObject<'py>,
-    R: FromPyObject<'py>,
+    L: FromPyObject<'a, 'py>,
+    R: FromPyObject<'a, 'py>,
 {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr = type_hint_union!(L::INPUT_TYPE, R::INPUT_TYPE);
+
     #[inline]
-    fn extract_bound(obj: &Bound<'py, PyAny>) -> PyResult<Self> {
+    fn extract(obj: Borrowed<'a, 'py, PyAny>) -> Result<Self, Self::Error> {
         if let Ok(l) = obj.extract::<L>() {
             Ok(Either::Left(l))
         } else if let Ok(r) = obj.extract::<R>() {
@@ -110,11 +123,6 @@ where
             );
             Err(PyTypeError::new_err(err_msg))
         }
-    }
-
-    #[cfg(feature = "experimental-inspect")]
-    fn type_input() -> TypeInfo {
-        TypeInfo::union_of(&[L::type_input(), R::type_input()])
     }
 }
 

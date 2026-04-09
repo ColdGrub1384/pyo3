@@ -1,7 +1,8 @@
+use crate::byteswriter::PyBytesWriter;
 use crate::ffi_ptr_ext::FfiPtrExt;
 use crate::instance::{Borrowed, Bound};
-use crate::types::any::PyAnyMethods;
 use crate::{ffi, Py, PyAny, PyResult, Python};
+use std::io::Write;
 use std::ops::Index;
 use std::slice::SliceIndex;
 use std::str;
@@ -22,8 +23,9 @@ use std::str;
 /// data in the Python bytes to a Rust `[u8]` byte slice.
 ///
 /// This is not always the most appropriate way to compare Python bytes, as Python bytes subclasses
-/// may have different equality semantics. In situations where subclasses overriding equality might be
-/// relevant, use [`PyAnyMethods::eq`], at cost of the additional overhead of a Python method call.
+/// may have different equality semantics. In situations where subclasses overriding equality might
+/// be relevant, use [`PyAnyMethods::eq`](crate::types::any::PyAnyMethods::eq), at cost of the
+/// additional overhead of a Python method call.
 ///
 /// ```rust
 /// # use pyo3::prelude::*;
@@ -47,7 +49,7 @@ use std::str;
 #[repr(transparent)]
 pub struct PyBytes(PyAny);
 
-pyobject_native_type_core!(PyBytes, pyobject_native_static_type_object!(ffi::PyBytes_Type), #checkfunction=ffi::PyBytes_Check);
+pyobject_native_type_core!(PyBytes, pyobject_native_static_type_object!(ffi::PyBytes_Type), "builtins", "bytes", #checkfunction=ffi::PyBytes_Check);
 
 impl PyBytes {
     /// Creates a new Python bytestring object.
@@ -60,7 +62,7 @@ impl PyBytes {
         unsafe {
             ffi::PyBytes_FromStringAndSize(ptr, len)
                 .assume_owned(py)
-                .downcast_into_unchecked()
+                .cast_into_unchecked()
         }
     }
 
@@ -96,7 +98,7 @@ impl PyBytes {
         unsafe {
             let pyptr = ffi::PyBytes_FromStringAndSize(std::ptr::null(), len as ffi::Py_ssize_t);
             // Check for an allocation error and return it
-            let pybytes = pyptr.assume_owned_or_err(py)?.downcast_into_unchecked();
+            let pybytes = pyptr.assume_owned_or_err(py)?.cast_into_unchecked();
             let buffer: *mut u8 = ffi::PyBytes_AsString(pyptr).cast();
             debug_assert!(!buffer.is_null());
             // Zero-initialise the uninitialised bytestring
@@ -105,6 +107,47 @@ impl PyBytes {
             // If init returns an Err, pypybytearray will automatically deallocate the buffer
             init(std::slice::from_raw_parts_mut(buffer, len)).map(|_| pybytes)
         }
+    }
+
+    /// Creates a new Python `bytes` object using a writer closure.
+    ///
+    /// This function allocates a Python `bytes` object with at least `reserved_capacity` bytes of capacity,
+    /// then provides a mutable writer to the closure `write`. The closure can write any number of bytes,
+    /// even more than the reserved capacity; the buffer will grow dynamically as needed.
+    ///
+    /// If `reserved_capacity` is 0, the buffer will start empty and grow as the writer writes data.
+    ///
+    /// After the closure returns, the resulting bytes object contains the written data.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use pyo3::{prelude::*, types::PyBytes};
+    /// use std::io::Write;
+    ///
+    /// # fn main() -> PyResult<()> {
+    /// Python::attach(|py| -> PyResult<()> {
+    ///     let py_bytes = PyBytes::new_with_writer(py, 0, |writer| {
+    ///         writer.write_all(b"hello world")?;
+    ///         Ok(())
+    ///     })?;
+    ///     assert_eq!(py_bytes.as_bytes(), b"hello world");
+    ///     Ok(())
+    /// })
+    /// # }
+    /// ```
+    #[inline]
+    pub fn new_with_writer<F>(
+        py: Python<'_>,
+        reserved_capacity: usize,
+        write: F,
+    ) -> PyResult<Bound<'_, PyBytes>>
+    where
+        F: FnOnce(&mut dyn Write) -> PyResult<()>,
+    {
+        let mut writer = PyBytesWriter::with_capacity(py, reserved_capacity)?;
+        write(&mut writer)?;
+        writer.try_into()
     }
 
     /// Creates a new Python byte string object from a raw pointer and length.
@@ -121,7 +164,7 @@ impl PyBytes {
         unsafe {
             ffi::PyBytes_FromStringAndSize(ptr.cast(), len as isize)
                 .assume_owned(py)
-                .downcast_into_unchecked()
+                .cast_into_unchecked()
         }
     }
 }
@@ -275,9 +318,24 @@ impl PartialEq<Borrowed<'_, '_, PyBytes>> for &'_ [u8] {
     }
 }
 
+impl<'a> AsRef<[u8]> for Borrowed<'a, '_, PyBytes> {
+    #[inline]
+    fn as_ref(&self) -> &'a [u8] {
+        self.as_bytes()
+    }
+}
+
+impl AsRef<[u8]> for Bound<'_, PyBytes> {
+    #[inline]
+    fn as_ref(&self) -> &[u8] {
+        self.as_bytes()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::PyAnyMethods as _;
 
     #[test]
     fn test_bytes_index() {
@@ -374,10 +432,36 @@ mod tests {
             let py_bytes = PyBytes::new(py, b);
             unsafe {
                 assert_eq!(
-                    ffi::PyBytes_AsString(py_bytes.as_ptr()) as *const std::os::raw::c_char,
-                    ffi::PyBytes_AS_STRING(py_bytes.as_ptr()) as *const std::os::raw::c_char
+                    ffi::PyBytes_AsString(py_bytes.as_ptr()) as *const std::ffi::c_char,
+                    ffi::PyBytes_AS_STRING(py_bytes.as_ptr()) as *const std::ffi::c_char
                 );
             }
+        })
+    }
+
+    #[test]
+    fn test_as_ref_slice() {
+        Python::attach(|py| {
+            let b = b"hello, world";
+            let py_bytes = PyBytes::new(py, b);
+            let ref_bound: &[u8] = py_bytes.as_ref();
+            assert_eq!(ref_bound, b);
+            let py_bytes_borrowed = py_bytes.as_borrowed();
+            let ref_borrowed: &[u8] = py_bytes_borrowed.as_ref();
+            assert_eq!(ref_borrowed, b);
+        })
+    }
+
+    #[test]
+    fn test_with_writer() {
+        Python::attach(|py| {
+            let bytes = PyBytes::new_with_writer(py, 0, |writer| {
+                writer.write_all(b"hallo")?;
+                Ok(())
+            })
+            .unwrap();
+
+            assert_eq!(bytes.as_bytes(), b"hallo");
         })
     }
 }

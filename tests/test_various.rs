@@ -6,8 +6,7 @@ use pyo3::types::PyTuple;
 
 use std::fmt;
 
-#[path = "../src/tests/common.rs"]
-mod common;
+mod test_utils;
 
 #[pyclass]
 struct MutRefArg {
@@ -145,7 +144,7 @@ fn test_pickle() {
             .get_item("modules")
             .unwrap()
             .unwrap()
-            .downcast::<PyDict>()?
+            .cast::<PyDict>()?
             .set_item(module.name()?, module)
     }
 

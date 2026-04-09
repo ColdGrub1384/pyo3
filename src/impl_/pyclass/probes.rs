@@ -1,6 +1,9 @@
 use std::marker::PhantomData;
 
-use crate::{conversion::IntoPyObject, Py};
+use crate::conversion::IntoPyObject;
+use crate::impl_::pyclass::PyClassBaseType;
+use crate::impl_::pyclass_init::PyNativeTypeInitializer;
+use crate::{FromPyObject, Py, PyClass, PyClassInitializer};
 
 /// Trait used to combine with zero-sized types to calculate at compile time
 /// some property of a type.
@@ -11,14 +14,20 @@ use crate::{conversion::IntoPyObject, Py};
 /// The true case is defined in the zero-sized type's impl block, which is
 /// gated on some property like trait bound or only being implemented
 /// for fixed concrete types.
-pub trait Probe {
+pub trait Probe: probe::Sealed {
     const VALUE: bool = false;
+}
+
+/// Seals `Probe` so that types outside PyO3 cannot implement it.
+mod probe {
+    pub trait Sealed {}
 }
 
 macro_rules! probe {
     ($name:ident) => {
         pub struct $name<T>(PhantomData<T>);
         impl<T> Probe for $name<T> {}
+        impl<T> probe::Sealed for $name<T> {}
     };
 }
 
@@ -30,9 +39,6 @@ impl<T> IsPyT<Py<T>> {
 
 probe!(IsIntoPyObjectRef);
 
-// Possible clippy beta regression,
-// see https://github.com/rust-lang/rust-clippy/issues/13578
-#[allow(clippy::extra_unused_lifetimes)]
 impl<'a, 'py, T: 'a> IsIntoPyObjectRef<T>
 where
     &'a T: IntoPyObject<'py>,
@@ -49,14 +55,92 @@ where
     pub const VALUE: bool = true;
 }
 
+probe!(IsSend);
+
+impl<T: Send> IsSend<T> {
+    pub const VALUE: bool = true;
+}
+
 probe!(IsSync);
 
 impl<T: Sync> IsSync<T> {
     pub const VALUE: bool = true;
 }
 
-probe!(IsOption);
+probe!(IsFromPyObject);
 
-impl<T> IsOption<Option<T>> {
+impl<'a, 'py, T> IsFromPyObject<T>
+where
+    T: FromPyObject<'a, 'py>,
+{
     pub const VALUE: bool = true;
 }
+
+probe!(HasNewTextSignature);
+
+impl<T: super::doc::PyClassNewTextSignature> HasNewTextSignature<T> {
+    pub const VALUE: bool = true;
+}
+
+probe!(IsClone);
+
+impl<T: Clone> IsClone<T> {
+    pub const VALUE: bool = true;
+}
+
+probe!(IsReturningEmptyTuple);
+
+impl IsReturningEmptyTuple<()> {
+    pub const VALUE: bool = true;
+}
+
+impl<E> IsReturningEmptyTuple<Result<(), E>> {
+    pub const VALUE: bool = true;
+}
+
+probe!(IsPyClass);
+
+impl<T> IsPyClass<T>
+where
+    T: PyClass,
+{
+    pub const VALUE: bool = true;
+}
+
+impl<T, E> IsPyClass<Result<T, E>>
+where
+    T: PyClass,
+{
+    pub const VALUE: bool = true;
+}
+
+probe!(IsInitializerTuple);
+
+impl<S, B> IsInitializerTuple<(S, B)>
+where
+    S: PyClass<BaseType = B>,
+    B: PyClass + PyClassBaseType<Initializer = PyClassInitializer<B>>,
+    B::BaseType: PyClassBaseType<Initializer = PyNativeTypeInitializer<B::BaseType>>,
+{
+    pub const VALUE: bool = true;
+}
+impl<S, B, E> IsInitializerTuple<Result<(S, B), E>>
+where
+    S: PyClass<BaseType = B>,
+    B: PyClass + PyClassBaseType<Initializer = PyClassInitializer<B>>,
+    B::BaseType: PyClassBaseType<Initializer = PyNativeTypeInitializer<B::BaseType>>,
+{
+    pub const VALUE: bool = true;
+}
+
+#[cfg(test)]
+macro_rules! value_of {
+    ($probe:ident, $ty:ty) => {{
+        #[allow(unused_imports)] // probe trait not used if VALUE is true
+        use crate::impl_::pyclass::Probe as _;
+        $probe::<$ty>::VALUE
+    }};
+}
+
+#[cfg(test)]
+pub(crate) use value_of;

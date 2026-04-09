@@ -1,8 +1,8 @@
 use crate::object::PyObject;
-use crate::pystate::PyThreadState;
-use std::os::raw::{c_char, c_int, c_void};
+use crate::pytypedefs::PyThreadState;
+use std::ffi::{c_char, c_int, c_void};
 
-extern "C" {
+extern_libpython! {
     #[cfg_attr(PyPy, link_name = "PyPyEval_EvalCode")]
     pub fn PyEval_EvalCode(
         arg1: *mut PyObject,
@@ -42,7 +42,7 @@ pub unsafe fn PyEval_CallObject(func: *mut PyObject, arg: *mut PyObject) -> *mut
     PyEval_CallObjectWithKeywords(func, arg, std::ptr::null_mut())
 }
 
-extern "C" {
+extern_libpython! {
     #[cfg(not(Py_3_13))]
     #[cfg_attr(Py_3_9, deprecated(note = "Python 3.9"))]
     #[cfg_attr(PyPy, link_name = "PyPyEval_CallFunction")]
@@ -62,7 +62,19 @@ extern "C" {
     pub fn PyEval_GetGlobals() -> *mut PyObject;
     #[cfg_attr(PyPy, link_name = "PyPyEval_GetLocals")]
     pub fn PyEval_GetLocals() -> *mut PyObject;
+    #[cfg_attr(PyPy, link_name = "PyPyEval_GetFrame")]
     pub fn PyEval_GetFrame() -> *mut crate::PyFrameObject;
+
+    #[cfg(Py_3_13)]
+    #[cfg_attr(PyPy, link_name = "PyPyEval_GetFrameBuiltins")]
+    pub fn PyEval_GetFrameBuiltins() -> *mut PyObject;
+    #[cfg(Py_3_13)]
+    #[cfg_attr(PyPy, link_name = "PyPyEval_GetFrameGlobals")]
+    pub fn PyEval_GetFrameGlobals() -> *mut PyObject;
+    #[cfg(Py_3_13)]
+    #[cfg_attr(PyPy, link_name = "PyPyEval_GetFrameLocals")]
+    pub fn PyEval_GetFrameLocals() -> *mut PyObject;
+
     #[cfg_attr(PyPy, link_name = "PyPy_AddPendingCall")]
     pub fn Py_AddPendingCall(
         func: Option<extern "C" fn(arg1: *mut c_void) -> c_int>,
@@ -70,35 +82,34 @@ extern "C" {
     ) -> c_int;
     #[cfg_attr(PyPy, link_name = "PyPy_MakePendingCalls")]
     pub fn Py_MakePendingCalls() -> c_int;
+
     #[cfg_attr(PyPy, link_name = "PyPy_SetRecursionLimit")]
     pub fn Py_SetRecursionLimit(arg1: c_int);
     #[cfg_attr(PyPy, link_name = "PyPy_GetRecursionLimit")]
     pub fn Py_GetRecursionLimit() -> c_int;
-    fn _Py_CheckRecursiveCall(_where: *mut c_char) -> c_int;
-}
 
-extern "C" {
     #[cfg(Py_3_9)]
     #[cfg_attr(PyPy, link_name = "PyPy_EnterRecursiveCall")]
     pub fn Py_EnterRecursiveCall(arg1: *const c_char) -> c_int;
     #[cfg(Py_3_9)]
     #[cfg_attr(PyPy, link_name = "PyPy_LeaveRecursiveCall")]
     pub fn Py_LeaveRecursiveCall();
-}
 
-extern "C" {
+    #[cfg_attr(PyPy, link_name = "PyPyEval_GetFuncName")]
     pub fn PyEval_GetFuncName(arg1: *mut PyObject) -> *const c_char;
+    #[cfg_attr(PyPy, link_name = "PyPyEval_GetFuncDesc")]
     pub fn PyEval_GetFuncDesc(arg1: *mut PyObject) -> *const c_char;
-    pub fn PyEval_GetCallStats(arg1: *mut PyObject) -> *mut PyObject;
+
+    #[cfg_attr(PyPy, link_name = "PyPyEval_EvalFrame")]
     pub fn PyEval_EvalFrame(arg1: *mut crate::PyFrameObject) -> *mut PyObject;
+    #[cfg_attr(PyPy, link_name = "PyPyEval_EvalFrameEx")]
     pub fn PyEval_EvalFrameEx(f: *mut crate::PyFrameObject, exc: c_int) -> *mut PyObject;
+
     #[cfg_attr(PyPy, link_name = "PyPyEval_SaveThread")]
     pub fn PyEval_SaveThread() -> *mut PyThreadState;
     #[cfg_attr(PyPy, link_name = "PyPyEval_RestoreThread")]
     pub fn PyEval_RestoreThread(arg1: *mut PyThreadState);
-}
 
-extern "C" {
     #[cfg(not(Py_3_13))]
     #[cfg_attr(PyPy, link_name = "PyPyEval_ThreadsInitialized")]
     #[cfg_attr(
@@ -116,14 +127,16 @@ extern "C" {
         )
     )]
     pub fn PyEval_InitThreads();
+    #[cfg(not(Py_3_13))]
+    #[deprecated(note = "Deprecated in Python 3.2")]
     pub fn PyEval_AcquireLock();
+    #[cfg(not(Py_3_13))]
+    #[deprecated(note = "Deprecated in Python 3.2")]
     pub fn PyEval_ReleaseLock();
     #[cfg_attr(PyPy, link_name = "PyPyEval_AcquireThread")]
     pub fn PyEval_AcquireThread(tstate: *mut PyThreadState);
     #[cfg_attr(PyPy, link_name = "PyPyEval_ReleaseThread")]
     pub fn PyEval_ReleaseThread(tstate: *mut PyThreadState);
-    #[cfg(not(Py_3_8))]
-    pub fn PyEval_ReInitThreads();
 }
 
 // skipped Py_BEGIN_ALLOW_THREADS

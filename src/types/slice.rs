@@ -1,7 +1,10 @@
 use crate::err::{PyErr, PyResult};
 use crate::ffi;
 use crate::ffi_ptr_ext::FfiPtrExt;
-use crate::types::any::PyAnyMethods;
+#[cfg(feature = "experimental-inspect")]
+use crate::inspect::PyStaticExpr;
+#[cfg(feature = "experimental-inspect")]
+use crate::type_object::PyTypeInfo;
 use crate::types::{PyRange, PyRangeMethods};
 use crate::{Bound, IntoPyObject, PyAny, Python};
 use std::convert::Infallible;
@@ -22,6 +25,8 @@ pyobject_native_type!(
     PySlice,
     ffi::PySliceObject,
     pyobject_native_static_type_object!(ffi::PySlice_Type),
+    "builtins",
+    "slice",
     #checkfunction=ffi::PySlice_Check
 );
 
@@ -64,7 +69,7 @@ impl PySlice {
                 ffi::PyLong_FromSsize_t(step),
             )
             .assume_owned(py)
-            .downcast_into_unchecked()
+            .cast_into_unchecked()
         }
     }
 
@@ -73,7 +78,7 @@ impl PySlice {
         unsafe {
             ffi::PySlice_New(ffi::Py_None(), ffi::Py_None(), ffi::Py_None())
                 .assume_owned(py)
-                .downcast_into_unchecked()
+                .cast_into_unchecked()
         }
     }
 }
@@ -126,6 +131,9 @@ impl<'py> IntoPyObject<'py> for PySliceIndices {
     type Output = Bound<'py, Self::Target>;
     type Error = Infallible;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = PySlice::TYPE_HINT;
+
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         Ok(PySlice::new(py, self.start, self.stop, self.step))
     }
@@ -135,6 +143,9 @@ impl<'py> IntoPyObject<'py> for &PySliceIndices {
     type Target = PySlice;
     type Output = Bound<'py, Self::Target>;
     type Error = Infallible;
+
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = PySlice::TYPE_HINT;
 
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         Ok(PySlice::new(py, self.start, self.stop, self.step))
@@ -157,6 +168,7 @@ impl<'py> TryFrom<Bound<'py, PyRange>> for Bound<'py, PySlice> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::PyAnyMethods as _;
 
     #[test]
     fn test_py_slice_new() {

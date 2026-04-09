@@ -1,3 +1,7 @@
+from typing import Iterable
+import shutil
+from pathlib import Path
+
 import nox
 import sys
 from nox.command import CommandFailed
@@ -8,7 +12,7 @@ nox.options.sessions = ["test"]
 @nox.session
 def test(session: nox.Session):
     session.env["MATURIN_PEP517_ARGS"] = "--profile=dev"
-    session.run_always("python", "-m", "pip", "install", "-v", ".[dev]")
+    session.install("-v", ".[dev]")
 
     def try_install_binary(package: str, constraint: str):
         try:
@@ -34,3 +38,33 @@ def test(session: nox.Session):
 def bench(session: nox.Session):
     session.install(".[dev]")
     session.run("pytest", "--benchmark-enable", "--benchmark-only", *session.posargs)
+
+
+@nox.session
+def mypy(session: nox.Session):
+    type_checker(
+        session,
+        ("python", "-m", "mypy", "tests"),
+    )
+    # TODO: enable stubtest session.run_always("python", "-m", "mypy.stubtest", "pyo3_pytests")
+
+
+@nox.session
+def pyrefly(session: nox.Session):
+    type_checker(
+        session,
+        ("python", "-m", "pyrefly", "check", "tests"),
+    )
+
+
+def type_checker(session: nox.Session, command: Iterable[str]):
+    session.env["MATURIN_PEP517_ARGS"] = "--profile=dev"
+    try:
+        # We move the stubs where maturin is expecting them to be
+        shutil.copytree("stubs", "pyo3_pytests")
+        (Path("pyo3_pytests") / "py.typed").touch()
+        session.install(".[dev]")
+
+        session.run_always(*command)
+    finally:
+        shutil.rmtree("pyo3_pytests")

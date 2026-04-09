@@ -1,8 +1,7 @@
 #![cfg(feature = "macros")]
 
-#[cfg(not(Py_LIMITED_API))]
+#[cfg(any(not(Py_LIMITED_API), Py_3_12))]
 use pyo3::exceptions::PyWarning;
-#[cfg(not(Py_GIL_DISABLED))]
 use pyo3::exceptions::{PyFutureWarning, PyUserWarning};
 use pyo3::prelude::*;
 use pyo3::py_run;
@@ -11,8 +10,9 @@ use pyo3::types::{IntoPyDict, PyDict, PyList, PySet, PyString, PyTuple, PyType};
 use pyo3::BoundObject;
 use pyo3_macros::pyclass;
 
-#[path = "../src/tests/common.rs"]
-mod common;
+use crate::test_utils::CatchWarnings;
+
+mod test_utils;
 
 #[pyclass]
 struct InstanceMethod {
@@ -289,7 +289,7 @@ impl MethSignature {
         py: Python<'_>,
         a: i32,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         [
             a.into_pyobject(py)?.into_any().into_bound(),
             kwargs.into_pyobject(py)?.into_any().into_bound(),
@@ -304,7 +304,7 @@ impl MethSignature {
         py: Python<'_>,
         a: i32,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         [
             a.into_pyobject(py)?.into_any().into_bound(),
             kwargs.into_pyobject(py)?.into_any().into_bound(),
@@ -334,7 +334,7 @@ impl MethSignature {
         py: Python<'_>,
         args: &Bound<'_, PyTuple>,
         a: i32,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         (args, a)
             .into_pyobject(py)
             .map(BoundObject::into_any)
@@ -357,7 +357,7 @@ impl MethSignature {
         py: Python<'_>,
         a: i32,
         kwargs: Option<&Bound<'_, PyDict>>,
-    ) -> PyResult<PyObject> {
+    ) -> PyResult<Py<PyAny>> {
         [
             a.into_pyobject(py)?.into_any().into_bound(),
             kwargs.into_pyobject(py)?.into_any().into_bound(),
@@ -922,9 +922,9 @@ fn test_from_sequence() {
 #[pyclass]
 struct r#RawIdents {
     #[pyo3(get, set)]
-    r#type: PyObject,
-    r#subtype: PyObject,
-    r#subsubtype: PyObject,
+    r#type: Py<PyAny>,
+    r#subtype: Py<PyAny>,
+    r#subsubtype: Py<PyAny>,
 }
 
 #[pymethods]
@@ -932,9 +932,9 @@ impl r#RawIdents {
     #[new]
     pub fn r#new(
         r#_py: Python<'_>,
-        r#type: PyObject,
-        r#subtype: PyObject,
-        r#subsubtype: PyObject,
+        r#type: Py<PyAny>,
+        r#subtype: Py<PyAny>,
+        r#subsubtype: Py<PyAny>,
     ) -> Self {
         Self {
             r#type,
@@ -944,36 +944,42 @@ impl r#RawIdents {
     }
 
     #[getter(r#subtype)]
-    pub fn r#get_subtype(&self, py: Python<'_>) -> PyObject {
+    pub fn r#get_subtype(&self, py: Python<'_>) -> Py<PyAny> {
         self.r#subtype.clone_ref(py)
     }
 
     #[setter(r#subtype)]
-    pub fn r#set_subtype(&mut self, r#subtype: PyObject) {
+    pub fn r#set_subtype(&mut self, r#subtype: Py<PyAny>) {
         self.r#subtype = r#subtype;
     }
 
+    #[deleter(r#subtype)]
+    pub fn r#del_subtype(&mut self) {}
+
     #[getter]
-    pub fn r#get_subsubtype(&self, py: Python<'_>) -> PyObject {
+    pub fn r#get_subsubtype(&self, py: Python<'_>) -> Py<PyAny> {
         self.r#subsubtype.clone_ref(py)
     }
 
     #[setter]
-    pub fn r#set_subsubtype(&mut self, r#subsubtype: PyObject) {
+    pub fn r#set_subsubtype(&mut self, r#subsubtype: Py<PyAny>) {
         self.r#subsubtype = r#subsubtype;
     }
 
-    pub fn r#__call__(&mut self, r#type: PyObject) {
+    #[deleter]
+    pub fn r#delete_subsubtype(&mut self) {}
+
+    pub fn r#__call__(&mut self, r#type: Py<PyAny>) {
         self.r#type = r#type;
     }
 
     #[staticmethod]
-    pub fn r#static_method(r#type: PyObject) -> PyObject {
+    pub fn r#static_method(r#type: Py<PyAny>) -> Py<PyAny> {
         r#type
     }
 
     #[classmethod]
-    pub fn r#class_method(_: &Bound<'_, PyType>, r#type: PyObject) -> PyObject {
+    pub fn r#class_method(_: &Bound<'_, PyType>, r#type: Py<PyAny>) -> Py<PyAny> {
         r#type
     }
 
@@ -1013,6 +1019,9 @@ fn test_raw_idents() {
             assert instance.type == 1
             assert instance.subtype == 2
             assert instance.subsubtype == 3
+
+            del instance.subtype
+            del instance.subsubtype
 
             assert raw_idents_type.static_method(type=30) == 30
             assert instance.class_method(type=40) == 40
@@ -1134,6 +1143,9 @@ issue_1506!(
         #[setter("foo")]
         fn issue_1506_setter(&self, _py: Python<'_>, _value: i32) {}
 
+        #[deleter("foo")]
+        fn issue_1506_deleter(&self, _py: Python<'_>) {}
+
         #[staticmethod]
         #[pyo3(signature = (_arg, _args, _kwargs=None))]
         fn issue_1506_static(
@@ -1208,11 +1220,11 @@ fn test_issue_2988() {
     }
 }
 
-#[cfg(not(Py_LIMITED_API))]
+#[cfg(any(not(Py_LIMITED_API), Py_3_12))]
 #[pyclass(extends=PyWarning)]
 pub struct UserDefinedWarning {}
 
-#[cfg(not(Py_LIMITED_API))]
+#[cfg(any(not(Py_LIMITED_API), Py_3_12))]
 #[pymethods]
 impl UserDefinedWarning {
     #[new]
@@ -1223,7 +1235,6 @@ impl UserDefinedWarning {
 }
 
 #[test]
-#[cfg(not(Py_GIL_DISABLED))] // FIXME: enable once `warnings` is thread-safe
 fn test_pymethods_warn() {
     // We do not test #[classattr] nor __traverse__
     // because it doesn't make sense to implement deprecated methods for them.
@@ -1247,7 +1258,7 @@ fn test_pymethods_warn() {
         #[pyo3(warn(message = "this method raises warning", category = PyFutureWarning))]
         fn method_with_warning_and_custom_category(_slf: PyRef<'_, Self>) {}
 
-        #[cfg(not(Py_LIMITED_API))]
+        #[cfg(any(not(Py_LIMITED_API), Py_3_12))]
         #[pyo3(warn(message = "this method raises user-defined warning", category = UserDefinedWarning))]
         fn method_with_warning_and_user_defined_category(&self) {}
 
@@ -1271,6 +1282,10 @@ fn test_pymethods_warn() {
             self.value = value;
         }
 
+        #[deleter]
+        #[pyo3(warn(message = "this deleter raises warning"))]
+        fn delete_value(&mut self) {}
+
         #[pyo3(warn(message = "this subscript op method raises warning"))]
         fn __getitem__(&self, _key: i32) -> i32 {
             0
@@ -1291,7 +1306,7 @@ fn test_pymethods_warn() {
 
     Python::attach(|py| {
         let typeobj = py.get_type::<WarningMethodContainer>();
-        let obj = typeobj.call0().unwrap();
+        let obj = CatchWarnings::enter(py, |_| typeobj.call0()).unwrap();
 
         // FnType::Fn
         py_expect_warning!(
@@ -1310,7 +1325,7 @@ fn test_pymethods_warn() {
         );
 
         // FnType::Fn, user-defined warning
-        #[cfg(not(Py_LIMITED_API))]
+        #[cfg(any(not(Py_LIMITED_API), Py_3_12))]
         py_expect_warning!(
             py,
             obj,
@@ -1369,6 +1384,14 @@ fn test_pymethods_warn() {
             [("this setter raises warning", PyUserWarning)]
         );
 
+        // #[deleter], FnType::Deleter
+        py_expect_warning!(
+            py,
+            obj,
+            "del obj.value",
+            [("this deleter raises warning", PyUserWarning)]
+        );
+
         // PyMethodProtoKind::Slot
         py_expect_warning!(
             py,
@@ -1424,7 +1447,6 @@ fn test_pymethods_warn() {
 }
 
 #[test]
-#[cfg(not(Py_GIL_DISABLED))] // FIXME: enable once `warnings` is thread-safe
 fn test_py_methods_multiple_warn() {
     #[pyclass]
     struct MultipleWarnContainer {}

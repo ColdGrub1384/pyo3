@@ -1,77 +1,37 @@
 use crate::exceptions::PyStopAsyncIteration;
-use crate::gil::LockGIL;
 use crate::impl_::callback::IntoPyCallbackOutput;
 use crate::impl_::panic::PanicTrap;
-use crate::impl_::pycell::{PyClassObject, PyClassObjectLayout};
+use crate::impl_::pycell::PyClassObjectBaseLayout;
 use crate::internal::get_slot::{get_slot, TP_BASE, TP_CLEAR, TP_TRAVERSE};
-use crate::pycell::impl_::PyClassBorrowChecker as _;
-use crate::pycell::{PyBorrowError, PyBorrowMutError};
-use crate::pyclass::boolean_struct::False;
-use crate::types::any::PyAnyMethods;
+use crate::internal::state::ForbidAttaching;
+use crate::pycell::impl_::{PyClassBorrowChecker as _, PyClassObjectLayout};
 use crate::types::PyType;
-use crate::{
-    ffi, Bound, DowncastError, Py, PyAny, PyClass, PyClassInitializer, PyErr, PyObject, PyRef,
-    PyRefMut, PyResult, PyTraverseError, PyTypeCheck, PyVisit, Python,
-};
+use crate::{ffi, Bound, Py, PyAny, PyClass, PyErr, PyResult, PyTraverseError, PyVisit, Python};
 use std::ffi::CStr;
+use std::ffi::{c_int, c_void};
 use std::fmt;
 use std::marker::PhantomData;
-use std::os::raw::{c_int, c_void};
 use std::panic::{catch_unwind, AssertUnwindSafe};
-use std::ptr::null_mut;
+use std::ptr::{null_mut, NonNull};
 
+use super::pyclass::PyClassImpl;
 use super::trampoline;
 use crate::internal_tricks::{clear_eq, traverse_eq};
 
-/// Python 3.8 and up - __ipow__ has modulo argument correctly populated.
-#[cfg(Py_3_8)]
-#[repr(transparent)]
-pub struct IPowModulo(*mut ffi::PyObject);
-
-/// Python 3.7 and older - __ipow__ does not have modulo argument correctly populated.
-#[cfg(not(Py_3_8))]
-#[repr(transparent)]
-pub struct IPowModulo(#[allow(dead_code)] std::mem::MaybeUninit<*mut ffi::PyObject>);
-
-/// Helper to use as pymethod ffi definition
-#[allow(non_camel_case_types)]
-pub type ipowfunc = unsafe extern "C" fn(
-    arg1: *mut ffi::PyObject,
-    arg2: *mut ffi::PyObject,
-    arg3: IPowModulo,
-) -> *mut ffi::PyObject;
-
-impl IPowModulo {
-    #[cfg(Py_3_8)]
-    #[inline]
-    pub fn as_ptr(self) -> *mut ffi::PyObject {
-        self.0
-    }
-
-    #[cfg(not(Py_3_8))]
-    #[inline]
-    pub fn as_ptr(self) -> *mut ffi::PyObject {
-        // Safety: returning a borrowed pointer to Python `None` singleton
-        unsafe { ffi::Py_None() }
-    }
-}
-
 /// `PyMethodDefType` represents different types of Python callable objects.
 /// It is used by the `#[pymethods]` attribute.
-#[cfg_attr(test, derive(Clone))]
+#[derive(Copy, Clone)]
 pub enum PyMethodDefType {
-    /// Represents class method
-    Class(PyMethodDef),
-    /// Represents static method
-    Static(PyMethodDef),
-    /// Represents normal method
+    /// Represents a class method (might be `classmethod` or `staticmethod`, depends on `ml_flags`)
     Method(PyMethodDef),
     /// Represents class attribute, used by `#[attribute]`
     ClassAttribute(PyClassAttributeDef),
     /// Represents getter descriptor, used by `#[getter]`
     Getter(PyGetterDef),
-    /// Represents setter descriptor, used by `#[setter]`
+    /// Represents setter descriptor, used by `#[setter]` and `#[deleter]`
     Setter(PySetterDef),
+    /// Represents deleter descriptor, used by `#[deleter]`
+    Deleter(PyDeleterDef),
     /// Represents a struct member
     StructMember(ffi::PyMemberDef),
 }
@@ -84,12 +44,9 @@ pub enum PyMethodType {
     PyCFunctionFastWithKeywords(ffi::PyCFunctionFastWithKeywords),
 }
 
-pub type PyClassAttributeFactory = for<'p> fn(Python<'p>) -> PyResult<PyObject>;
+pub type PyClassAttributeFactory = for<'p> fn(Python<'p>) -> PyResult<Py<PyAny>>;
 
-// TODO: it would be nice to use CStr in these types, but then the constructors can't be const fn
-// until `CStr::from_bytes_with_nul_unchecked` is const fn.
-
-#[derive(Clone, Debug)]
+#[derive(Copy, Clone, Debug)]
 pub struct PyMethodDef {
     pub(crate) ml_name: &'static CStr,
     pub(crate) ml_meth: PyMethodType,
@@ -103,28 +60,102 @@ pub struct PyClassAttributeDef {
     pub(crate) meth: PyClassAttributeFactory,
 }
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub struct PyGetterDef {
     pub(crate) name: &'static CStr,
     pub(crate) meth: Getter,
-    pub(crate) doc: &'static CStr,
+    pub(crate) doc: Option<&'static CStr>,
 }
 
-#[derive(Clone)]
+#[derive(Copy, Clone)]
 pub struct PySetterDef {
     pub(crate) name: &'static CStr,
     pub(crate) meth: Setter,
-    pub(crate) doc: &'static CStr,
+    pub(crate) doc: Option<&'static CStr>,
 }
 
-unsafe impl Sync for PyMethodDef {}
+#[derive(Copy, Clone)]
+pub struct PyDeleterDef {
+    pub(crate) name: &'static CStr,
+    pub(crate) meth: Deleter,
+    pub(crate) doc: Option<&'static CStr>,
+}
 
-unsafe impl Sync for PyGetterDef {}
+/// Abstraction around fastcall calling convention, which is only available in Python 3.10 and up,
+/// can inline this directly into the proc macro when Python 3.10 support dropped
+#[cfg(any(Py_3_10, not(Py_LIMITED_API)))]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! maybe_define_fastcall_function_with_keywords {
+    ($name:ident, $py:ident, $slf:ident, $args:ident, $nargs:ident, $kwargs:ident, $body:block) => {
+        #[allow(non_snake_case)]
+        unsafe fn $name<'py>(
+            $py: $crate::Python<'py>,
+            $slf: *mut $crate::ffi::PyObject,
+            $args: *const *mut $crate::ffi::PyObject,
+            $nargs: $crate::ffi::Py_ssize_t,
+            $kwargs: *mut $crate::ffi::PyObject
+        ) -> $crate::PyResult<*mut $crate::ffi::PyObject> $body
+    };
+}
 
-unsafe impl Sync for PySetterDef {}
+/// On older abi3 versions, required to use varargs calling convention
+#[cfg(not(any(Py_3_10, not(Py_LIMITED_API))))]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! maybe_define_fastcall_function_with_keywords {
+    ($name:ident, $py:ident, $slf:ident, $args:ident, $nargs:ident, $kwargs:ident, $body:block) => {
+        #[allow(non_snake_case)]
+        unsafe fn $name<'py>(
+            $py: $crate::Python<'py>,
+            $slf: *mut $crate::ffi::PyObject,
+            $args: *mut $crate::ffi::PyObject,
+            $kwargs: *mut $crate::ffi::PyObject
+        ) -> $crate::PyResult<*mut $crate::ffi::PyObject> $body
+    };
+}
+
+pub use crate::maybe_define_fastcall_function_with_keywords;
+
+#[cfg(any(Py_3_10, not(Py_LIMITED_API)))]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! maybe_extract_arguments_fastcall {
+    ($description:ident, $py:ident, $args:ident, $nargs:ident, $kwargs:ident, $args_array:ident, $args_handler:ty, $kwargs_handler:ty) => {
+        // SAFETY: guaranteed by the proc macro that all args to extract_arguments_fastcall are valid
+        unsafe {
+            $description.extract_arguments_fastcall::<$args_handler, $kwargs_handler>(
+                $py,
+                $args,
+                $nargs,
+                $kwargs,
+                &mut $args_array,
+            )
+        }
+    };
+}
+
+#[cfg(not(any(Py_3_10, not(Py_LIMITED_API))))]
+#[macro_export]
+#[doc(hidden)]
+macro_rules! maybe_extract_arguments_fastcall {
+    ($description:ident, $py:ident, $args:ident, $nargs:ident, $kwargs:ident, $args_array:ident, $args_handler:ty, $kwargs_handler:ty) => {
+        // SAFETY: guaranteed by the proc macro that all args to extract_arguments_tuple_dict are valid
+        unsafe {
+            $description.extract_arguments_tuple_dict::<$args_handler, $kwargs_handler>(
+                $py,
+                $args,
+                $kwargs,
+                &mut $args_array,
+            )
+        }
+    };
+}
+
+pub use crate::maybe_extract_arguments_fastcall;
 
 impl PyMethodDef {
-    /// Define a function with no `*args` and `**kwargs`.
+    /// Define a function that takes no arguments.
     pub const fn noargs(
         ml_name: &'static CStr,
         cfunction: ffi::PyCFunction,
@@ -138,7 +169,7 @@ impl PyMethodDef {
         }
     }
 
-    /// Define a function that can take `*args` and `**kwargs`.
+    /// Define a function that takes arbitrary arguments as a tuple and dict.
     pub const fn cfunction_with_keywords(
         ml_name: &'static CStr,
         cfunction: ffi::PyCFunctionWithKeywords,
@@ -152,7 +183,7 @@ impl PyMethodDef {
         }
     }
 
-    /// Define a function that can take `*args` and `**kwargs`.
+    /// Define a function that takes arbitrary arguments as a C-style array and tuple of keyword arguments.
     #[cfg(any(Py_3_10, not(Py_LIMITED_API)))]
     pub const fn fastcall_cfunction_with_keywords(
         ml_name: &'static CStr,
@@ -167,13 +198,31 @@ impl PyMethodDef {
         }
     }
 
+    /// Abstraction over fastcall to fall back to varargs on older Python versions.
+    pub const fn maybe_fastcall_cfunction_with_keywords(
+        ml_name: &'static CStr,
+        #[cfg(any(Py_3_10, not(Py_LIMITED_API)))] cfunction: ffi::PyCFunctionFastWithKeywords,
+        // on older abi3 versions, Fastcall not supported
+        #[cfg(not(any(Py_3_10, not(Py_LIMITED_API))))] cfunction: ffi::PyCFunctionWithKeywords,
+        ml_doc: &'static CStr,
+    ) -> Self {
+        #[cfg(any(Py_3_10, not(Py_LIMITED_API)))]
+        {
+            Self::fastcall_cfunction_with_keywords(ml_name, cfunction, ml_doc)
+        }
+
+        #[cfg(not(any(Py_3_10, not(Py_LIMITED_API))))]
+        {
+            Self::cfunction_with_keywords(ml_name, cfunction, ml_doc)
+        }
+    }
+
     pub const fn flags(mut self, flags: c_int) -> Self {
         self.ml_flags |= flags;
         self
     }
 
-    /// Convert `PyMethodDef` to Python method definition struct `ffi::PyMethodDef`
-    pub(crate) fn as_method_def(&self) -> ffi::PyMethodDef {
+    pub const fn into_raw(self) -> ffi::PyMethodDef {
         let meth = match self.ml_meth {
             PyMethodType::PyCFunction(meth) => ffi::PyMethodDefPointer { PyCFunction: meth },
             PyMethodType::PyCFunctionWithKeywords(meth) => ffi::PyMethodDefPointer {
@@ -213,13 +262,18 @@ impl fmt::Debug for PyClassAttributeDef {
 
 /// Class getter / setters
 pub(crate) type Getter =
-    for<'py> unsafe fn(Python<'py>, *mut ffi::PyObject) -> PyResult<*mut ffi::PyObject>;
-pub(crate) type Setter =
-    for<'py> unsafe fn(Python<'py>, *mut ffi::PyObject, *mut ffi::PyObject) -> PyResult<c_int>;
+    for<'py> unsafe fn(Python<'py>, NonNull<ffi::PyObject>) -> PyResult<*mut ffi::PyObject>;
+pub(crate) type Setter = for<'py> unsafe fn(
+    Python<'py>,
+    NonNull<ffi::PyObject>,
+    NonNull<ffi::PyObject>,
+) -> PyResult<c_int>;
+pub(crate) type Deleter =
+    for<'py> unsafe fn(Python<'py>, NonNull<ffi::PyObject>) -> PyResult<c_int>;
 
 impl PyGetterDef {
     /// Define a getter.
-    pub const fn new(name: &'static CStr, getter: Getter, doc: &'static CStr) -> Self {
+    pub const fn new(name: &'static CStr, getter: Getter, doc: Option<&'static CStr>) -> Self {
         Self {
             name,
             meth: getter,
@@ -230,10 +284,21 @@ impl PyGetterDef {
 
 impl PySetterDef {
     /// Define a setter.
-    pub const fn new(name: &'static CStr, setter: Setter, doc: &'static CStr) -> Self {
+    pub const fn new(name: &'static CStr, setter: Setter, doc: Option<&'static CStr>) -> Self {
         Self {
             name,
             meth: setter,
+            doc,
+        }
+    }
+}
+
+impl PyDeleterDef {
+    /// Define a deleter.
+    pub const fn new(name: &'static CStr, deleter: Deleter, doc: Option<&'static CStr>) -> Self {
+        Self {
+            name,
+            meth: deleter,
             doc,
         }
     }
@@ -285,15 +350,13 @@ pub unsafe fn _call_traverse<T>(
 where
     T: PyClass,
 {
-    // It is important the implementation of `__traverse__` cannot safely access the GIL,
-    // c.f. https://github.com/PyO3/pyo3/issues/3165, and hence we do not expose our GIL
-    // token to the user code and lock safe methods for acquiring the GIL.
+    // It is important the implementation of `__traverse__` cannot safely access the interpreter,
+    // c.f. https://github.com/PyO3/pyo3/issues/3165, and hence we do not expose our Python
+    // token to the user code and forbid safe methods for attaching.
     // (This includes enforcing the `&self` method receiver as e.g. `PyRef<Self>` could
-    // reconstruct a GIL token via `PyRef::py`.)
-    // Since we do not create a `GILPool` at all, it is important that our usage of the GIL
-    // token does not produce any owned objects thereby calling into `register_owned`.
+    // reconstruct a Python token via `PyRef::py`.)
     let trap = PanicTrap::new("uncaught panic inside __traverse__ handler");
-    let lock = LockGIL::during_traverse();
+    let lock = ForbidAttaching::during_traverse();
 
     let super_retval = unsafe { call_super_traverse(slf, visit, arg, current_traverse) };
     if super_retval != 0 {
@@ -302,7 +365,7 @@ where
 
     // SAFETY: `slf` is a valid Python object pointer to a class object of type T, and
     // traversal is running so no mutations can occur.
-    let class_object: &PyClassObject<T> = unsafe { &*slf.cast() };
+    let class_object: &<T as PyClassImpl>::Layout = unsafe { &*slf.cast() };
 
     let retval =
     // `#[pyclass(unsendable)]` types can only be deallocated by their own thread, so
@@ -310,8 +373,8 @@ where
     if class_object.check_threadsafe().is_ok()
     // ... and we cannot traverse a type which might be being mutated by a Rust thread
     && class_object.borrow_checker().try_borrow().is_ok() {
-        struct TraverseGuard<'a, T: PyClass>(&'a PyClassObject<T>);
-        impl<T: PyClass> Drop for TraverseGuard<'_,  T> {
+        struct TraverseGuard<'a, T: PyClassImpl>(&'a T::Layout);
+        impl<T: PyClassImpl> Drop for TraverseGuard<'_, T> {
             fn drop(&mut self) {
                 self.0.borrow_checker().release_borrow()
             }
@@ -319,8 +382,8 @@ where
 
         // `.try_borrow()` above created a borrow, we need to release it when we're done
         // traversing the object. This allows us to read `instance` safely.
-        let _guard = TraverseGuard(class_object);
-        let instance = unsafe {&*class_object.contents.value.get()};
+        let _guard = TraverseGuard::<T>(class_object);
+        let instance = unsafe {&*class_object.contents().value.get()};
 
         let visit = PyVisit { visit, arg, _guard: PhantomData };
 
@@ -624,89 +687,16 @@ pub trait AsyncIterResultOptionKind {
 
 impl<Value, Error> AsyncIterResultOptionKind for Result<Option<Value>, Error> {}
 
-/// Used in `#[classmethod]` to pass the class object to the method
-/// and also in `#[pyfunction(pass_module)]`.
-///
-/// This is a wrapper to avoid implementing `From<Bound>` for GIL Refs.
-///
-/// Once the GIL Ref API is fully removed, it should be possible to simplify
-/// this to just `&'a Bound<'py, T>` and `From` implementations.
-pub struct BoundRef<'a, 'py, T>(pub &'a Bound<'py, T>);
-
-impl<'a, 'py> BoundRef<'a, 'py, PyAny> {
-    pub unsafe fn ref_from_ptr(py: Python<'py>, ptr: &'a *mut ffi::PyObject) -> Self {
-        unsafe { BoundRef(Bound::ref_from_ptr(py, ptr)) }
-    }
-
-    pub unsafe fn ref_from_ptr_or_opt(
-        py: Python<'py>,
-        ptr: &'a *mut ffi::PyObject,
-    ) -> Option<Self> {
-        unsafe { Bound::ref_from_ptr_or_opt(py, ptr).as_ref().map(BoundRef) }
-    }
-
-    pub fn downcast<T: PyTypeCheck>(self) -> Result<BoundRef<'a, 'py, T>, DowncastError<'a, 'py>> {
-        self.0.downcast::<T>().map(BoundRef)
-    }
-
-    pub unsafe fn downcast_unchecked<T>(self) -> BoundRef<'a, 'py, T> {
-        unsafe { BoundRef(self.0.downcast_unchecked::<T>()) }
-    }
-}
-
-impl<'a, 'py, T: PyClass> TryFrom<BoundRef<'a, 'py, T>> for PyRef<'py, T> {
-    type Error = PyBorrowError;
-    #[inline]
-    fn try_from(value: BoundRef<'a, 'py, T>) -> Result<Self, Self::Error> {
-        value.0.try_borrow()
-    }
-}
-
-impl<'a, 'py, T: PyClass<Frozen = False>> TryFrom<BoundRef<'a, 'py, T>> for PyRefMut<'py, T> {
-    type Error = PyBorrowMutError;
-    #[inline]
-    fn try_from(value: BoundRef<'a, 'py, T>) -> Result<Self, Self::Error> {
-        value.0.try_borrow_mut()
-    }
-}
-
-impl<'a, 'py, T> From<BoundRef<'a, 'py, T>> for Bound<'py, T> {
-    #[inline]
-    fn from(bound: BoundRef<'a, 'py, T>) -> Self {
-        bound.0.clone()
-    }
-}
-
-impl<'a, 'py, T> From<BoundRef<'a, 'py, T>> for &'a Bound<'py, T> {
-    #[inline]
-    fn from(bound: BoundRef<'a, 'py, T>) -> Self {
-        bound.0
-    }
-}
-
-impl<T> From<BoundRef<'_, '_, T>> for Py<T> {
-    #[inline]
-    fn from(bound: BoundRef<'_, '_, T>) -> Self {
-        bound.0.clone().unbind()
-    }
-}
-
-impl<'py, T> std::ops::Deref for BoundRef<'_, 'py, T> {
-    type Target = Bound<'py, T>;
-    #[inline]
-    fn deref(&self) -> &Self::Target {
-        self.0
-    }
-}
-
-pub unsafe fn tp_new_impl<T: PyClass>(
-    py: Python<'_>,
-    initializer: PyClassInitializer<T>,
-    target_type: *mut ffi::PyTypeObject,
-) -> PyResult<*mut ffi::PyObject> {
+pub unsafe fn tp_new_impl<'py, T, const IS_PYCLASS: bool, const IS_INITIALIZER_TUPLE: bool>(
+    py: Python<'py>,
+    obj: T,
+    cls: *mut ffi::PyTypeObject,
+) -> PyResult<*mut ffi::PyObject>
+where
+    T: super::pyclass_init::PyClassInit<'py, IS_PYCLASS, IS_INITIALIZER_TUPLE>,
+{
     unsafe {
-        initializer
-            .create_class_object_of_type(py, target_type)
+        obj.init(crate::Borrowed::from_ptr_unchecked(py, cls.cast()).cast_unchecked())
             .map(Bound::into_ptr)
     }
 }
@@ -717,10 +707,21 @@ mod tests {
     #[cfg(any(Py_3_10, not(Py_LIMITED_API)))]
     fn test_fastcall_function_with_keywords() {
         use super::PyMethodDef;
-        use crate::types::{PyAnyMethods, PyCFunction};
+        use crate::impl_::pyfunction::PyFunctionDef;
+        use crate::types::PyAnyMethods;
         use crate::{ffi, Python};
 
         Python::attach(|py| {
+            let def =
+                PyFunctionDef::from_method_def(PyMethodDef::fastcall_cfunction_with_keywords(
+                    c"test",
+                    accepts_no_arguments,
+                    c"doc",
+                ));
+            // leak to make it 'static
+            // deliberately done at runtime to have coverage of `PyFunctionDef::from_method_def`
+            let def = Box::leak(Box::new(def));
+
             unsafe extern "C" fn accepts_no_arguments(
                 _slf: *mut ffi::PyObject,
                 _args: *const *mut ffi::PyObject,
@@ -729,19 +730,10 @@ mod tests {
             ) -> *mut ffi::PyObject {
                 assert_eq!(nargs, 0);
                 assert!(kwargs.is_null());
-                unsafe { Python::assume_gil_acquired().None().into_ptr() }
+                unsafe { Python::assume_attached().None().into_ptr() }
             }
 
-            let f = PyCFunction::internal_new(
-                py,
-                &PyMethodDef::fastcall_cfunction_with_keywords(
-                    ffi::c_str!("test"),
-                    accepts_no_arguments,
-                    ffi::c_str!("doc"),
-                ),
-                None,
-            )
-            .unwrap();
+            let f = def.create_py_c_function(py, None).unwrap();
 
             f.call0().unwrap();
         });

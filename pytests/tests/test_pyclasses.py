@@ -1,4 +1,5 @@
 import platform
+import sys
 from typing import Type
 
 import pytest
@@ -60,19 +61,35 @@ def test_iter():
 )
 def test_parallel_iter():
     import concurrent.futures
+    import threading
 
-    i = pyclasses.PyClassThreadIter()
-
-    def func():
-        next(i)
+    thread_iter = pyclasses.PyClassThreadIter()
+    max_workers = 2
+    b = threading.Barrier(max_workers)
+    error_happened = threading.Event()
 
     # the second thread attempts to borrow a reference to the instance's
     # state while the first thread is still sleeping, so we trigger a
     # runtime borrow-check error
-    with pytest.raises(RuntimeError, match="Already borrowed"):
-        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as tpe:
-            futures = [tpe.submit(func), tpe.submit(func)]
-            [f.result() for f in futures]
+    def closure(i):
+        b.wait()
+        # should never reach 100 iterations, the borrow error should
+        # happen relatively quickly because the loops are synchronized
+        for j in range(100):
+            if not error_happened.is_set():
+                try:
+                    next(thread_iter)
+                except RuntimeError as e:
+                    assert "Already borrowed" in str(e), str(e)
+                    error_happened.set()
+            else:
+                break
+        else:
+            assert False, "Should not be able to complete loop"
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as tpe:
+        for _ in tpe.map(closure, range(max_workers)):
+            pass
 
 
 class AssertingSubClass(pyclasses.AssertingBaseClass):
@@ -89,13 +106,29 @@ def test_new_classmethod():
 
 class ClassWithoutConstructor:
     def __new__(cls):
-        raise TypeError("No constructor defined for ClassWithoutConstructor")
+        raise TypeError(
+            f"cannot create '{cls.__module__}.{cls.__qualname__}' instances"
+        )
 
 
-@pytest.mark.parametrize(
-    "cls", [pyclasses.ClassWithoutConstructor, ClassWithoutConstructor]
+@pytest.mark.xfail(
+    platform.python_implementation() == "PyPy" and sys.version_info[:2] == (3, 11),
+    reason="broken on PyPy 3.11 due to https://github.com/pypy/pypy/issues/5319, waiting for next release",
 )
-def test_no_constructor_defined_propagates_cause(cls: Type):
+@pytest.mark.parametrize(
+    "cls, exc_message",
+    [
+        (
+            pyclasses.ClassWithoutConstructor,
+            "cannot create 'builtins.ClassWithoutConstructor' instances",
+        ),
+        (
+            ClassWithoutConstructor,
+            "cannot create 'test_pyclasses.ClassWithoutConstructor' instances",
+        ),
+    ],
+)
+def test_no_constructor_defined_propagates_cause(cls: Type, exc_message: str):
     original_error = ValueError("Original message")
     with pytest.raises(Exception) as exc_info:
         try:
@@ -104,9 +137,7 @@ def test_no_constructor_defined_propagates_cause(cls: Type):
             cls()  # should raise TypeError("No constructor defined for ...")
 
     assert exc_info.type is TypeError
-    assert exc_info.value.args == (
-        "No constructor defined for ClassWithoutConstructor",
-    )
+    assert exc_info.value.args == (exc_message,)
     assert exc_info.value.__context__ is original_error
 
 
@@ -119,7 +150,7 @@ def test_dict():
     d = ClassWithDict()
     assert d.__dict__ == {}
 
-    d.foo = 42
+    d.foo = 42  # type: ignore[missing-attribute]
     assert d.__dict__ == {"foo": 42}
 
 
@@ -137,6 +168,15 @@ def test_setter(benchmark):
     benchmark(set_attr)
 
 
+def test_deleter():
+    obj = pyclasses.ClassWithDecorators()
+    del obj.attr
+    with pytest.raises(AttributeError):
+        _ = obj.attr
+    obj.attr = 42
+    assert obj.attr == 42
+
+
 def test_class_attribute(benchmark):
     cls = pyclasses.ClassWithDecorators
     benchmark(lambda: cls.cls_attribute)
@@ -150,3 +190,16 @@ def test_class_method(benchmark):
 def test_static_method(benchmark):
     cls = pyclasses.ClassWithDecorators
     benchmark(lambda: cls.static_method())
+
+
+def test_class_init_method():
+    try:
+        SubClassWithInit = pyclasses.SubClassWithInit
+    except AttributeError:
+        pytest.skip("not defined using abi3")
+
+    d = SubClassWithInit()
+    assert d == {"__init__": True}
+
+    d = SubClassWithInit({"a": 1}, b=2)
+    assert d == {"__init__": True, "a": 1, "b": 2}

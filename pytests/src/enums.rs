@@ -1,26 +1,18 @@
-use pyo3::{
-    pyclass, pyfunction, pymodule,
-    types::{PyModule, PyModuleMethods},
-    wrap_pyfunction, Bound, PyResult,
-};
+use pyo3::{pyclass, pyfunction, pymodule};
 
-#[pymodule(gil_used = false)]
-pub fn enums(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<SimpleEnum>()?;
-    m.add_class::<ComplexEnum>()?;
-    m.add_class::<SimpleTupleEnum>()?;
-    m.add_class::<TupleEnum>()?;
-    m.add_class::<MixedComplexEnum>()?;
-    m.add_wrapped(wrap_pyfunction!(do_simple_stuff))?;
-    m.add_wrapped(wrap_pyfunction!(do_complex_stuff))?;
-    m.add_wrapped(wrap_pyfunction!(do_tuple_stuff))?;
-    m.add_wrapped(wrap_pyfunction!(do_mixed_complex_stuff))?;
-    Ok(())
+#[pymodule]
+pub mod enums {
+    #[pymodule_export]
+    use super::{
+        do_complex_stuff, do_mixed_complex_stuff, do_simple_stuff, do_tuple_stuff, ComplexEnum,
+        MixedComplexEnum, SimpleEnum, SimpleEnumWithoutDerive, SimpleTupleEnum, TupleEnum,
+    };
 }
 
 #[pyclass(eq, eq_int)]
 #[derive(PartialEq)]
 pub enum SimpleEnum {
+    /// A variant
     Sunday,
     Monday,
     Tuesday,
@@ -28,6 +20,12 @@ pub enum SimpleEnum {
     Thursday,
     Friday,
     Saturday,
+}
+
+#[pyclass]
+pub enum SimpleEnumWithoutDerive {
+    A,
+    B,
 }
 
 #[pyfunction]
@@ -45,7 +43,9 @@ pub fn do_simple_stuff(thing: &SimpleEnum) -> SimpleEnum {
 
 #[pyclass]
 pub enum ComplexEnum {
+    /// A struct variant
     Int {
+        /// An integer
         i: i32,
     },
     Float {
@@ -94,6 +94,7 @@ enum SimpleTupleEnum {
 
 #[pyclass]
 pub enum TupleEnum {
+    /// A tuple variant
     #[pyo3(constructor = (_0 = 1, _1 = 1.0, _2 = true))]
     FullWithDefault(i32, f64, bool),
     Full(i32, f64, bool),

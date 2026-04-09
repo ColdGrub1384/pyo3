@@ -1,21 +1,23 @@
 use crate::pyport::Py_ssize_t;
 use crate::PyObject;
-#[cfg(py_sys_config = "Py_REF_DEBUG")]
-use std::os::raw::c_char;
-#[cfg(Py_3_12)]
-use std::os::raw::c_int;
+#[cfg(all(not(Py_LIMITED_API), py_sys_config = "Py_REF_DEBUG"))]
+use std::ffi::c_char;
+#[cfg(any(Py_3_12, all(py_sys_config = "Py_REF_DEBUG", not(Py_LIMITED_API))))]
+use std::ffi::c_int;
 #[cfg(all(Py_3_14, any(not(Py_GIL_DISABLED), target_pointer_width = "32")))]
-use std::os::raw::c_long;
+use std::ffi::c_long;
 #[cfg(any(Py_GIL_DISABLED, all(Py_3_12, not(Py_3_14))))]
-use std::os::raw::c_uint;
+use std::ffi::c_uint;
 #[cfg(all(Py_3_14, not(Py_GIL_DISABLED)))]
-use std::os::raw::c_ulong;
+use std::ffi::c_ulong;
 use std::ptr;
 #[cfg(Py_GIL_DISABLED)]
 use std::sync::atomic::Ordering::Relaxed;
 
-#[cfg(Py_3_14)]
+#[cfg(all(Py_3_14, not(Py_3_15)))]
 const _Py_STATICALLY_ALLOCATED_FLAG: c_int = 1 << 7;
+#[cfg(Py_3_15)]
+pub(crate) const _Py_STATICALLY_ALLOCATED_FLAG: c_int = 1 << 2;
 
 #[cfg(all(Py_3_12, not(Py_3_14)))]
 const _Py_IMMORTAL_REFCNT: Py_ssize_t = {
@@ -72,7 +74,7 @@ const _Py_REF_SHARED_SHIFT: isize = 2;
 
 // skipped private _Py_REF_SHARED
 
-extern "C" {
+extern_libpython! {
     #[cfg(all(Py_3_14, Py_LIMITED_API))]
     pub fn Py_REFCNT(ob: *mut PyObject) -> Py_ssize_t;
 }
@@ -145,7 +147,7 @@ unsafe fn _Py_IsImmortal(op: *mut PyObject) -> c_int {
 
 // TODO: Py_SET_REFCNT
 
-extern "C" {
+extern_libpython! {
     #[cfg(all(py_sys_config = "Py_REF_DEBUG", not(Py_LIMITED_API)))]
     fn _Py_NegativeRefcount(filename: *const c_char, lineno: c_int, op: *mut PyObject);
     #[cfg(all(Py_3_12, py_sys_config = "Py_REF_DEBUG", not(Py_LIMITED_API)))]
@@ -340,7 +342,7 @@ pub unsafe fn Py_XDECREF(op: *mut PyObject) {
     }
 }
 
-extern "C" {
+extern_libpython! {
     #[cfg(all(Py_3_10, Py_LIMITED_API, not(PyPy)))]
     #[cfg_attr(docsrs, doc(cfg(Py_3_10)))]
     pub fn Py_NewRef(obj: *mut PyObject) -> *mut PyObject;

@@ -93,14 +93,16 @@
 //! result = get_eigenvalues(m11,m12,m21,m22)
 //! assert result == [complex(1,-1), complex(-2,0)]
 //! ```
+#[cfg(feature = "experimental-inspect")]
+use crate::inspect::PyStaticExpr;
+#[cfg(feature = "experimental-inspect")]
+use crate::type_hint_identifier;
 use crate::{
-    ffi,
-    ffi_ptr_ext::FfiPtrExt,
-    types::{any::PyAnyMethods, PyComplex},
-    Bound, FromPyObject, PyAny, PyErr, PyResult, Python,
+    ffi, ffi_ptr_ext::FfiPtrExt, types::PyComplex, Borrowed, Bound, FromPyObject, PyAny, PyErr,
+    Python,
 };
 use num_complex::Complex;
-use std::os::raw::c_double;
+use std::ffi::c_double;
 
 impl PyComplex {
     /// Creates a new Python `PyComplex` object from `num_complex`'s [`Complex`].
@@ -111,7 +113,7 @@ impl PyComplex {
         unsafe {
             ffi::PyComplex_FromDoubles(complex.re.into(), complex.im.into())
                 .assume_owned(py)
-                .downcast_into_unchecked()
+                .cast_into_unchecked()
         }
     }
 }
@@ -124,12 +126,15 @@ macro_rules! complex_conversion {
             type Output = Bound<'py, Self::Target>;
             type Error = std::convert::Infallible;
 
+            #[cfg(feature = "experimental-inspect")]
+            const OUTPUT_TYPE: PyStaticExpr = type_hint_identifier!("builtins", "complex");
+
             fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
                 unsafe {
                     Ok(
                         ffi::PyComplex_FromDoubles(self.re as c_double, self.im as c_double)
                             .assume_owned(py)
-                            .downcast_into_unchecked(),
+                            .cast_into_unchecked(),
                     )
                 }
             }
@@ -141,6 +146,9 @@ macro_rules! complex_conversion {
             type Output = Bound<'py, Self::Target>;
             type Error = std::convert::Infallible;
 
+            #[cfg(feature = "experimental-inspect")]
+            const OUTPUT_TYPE: PyStaticExpr = <Complex<$float>>::OUTPUT_TYPE;
+
             #[inline]
             fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
                 (*self).into_pyobject(py)
@@ -148,8 +156,13 @@ macro_rules! complex_conversion {
         }
 
         #[cfg_attr(docsrs, doc(cfg(feature = "num-complex")))]
-        impl FromPyObject<'_> for Complex<$float> {
-            fn extract_bound(obj: &Bound<'_, PyAny>) -> PyResult<Complex<$float>> {
+        impl FromPyObject<'_, '_> for Complex<$float> {
+            type Error = PyErr;
+
+            #[cfg(feature = "experimental-inspect")]
+            const INPUT_TYPE: PyStaticExpr = type_hint_identifier!("builtins", "complex");
+
+            fn extract(obj: Borrowed<'_, '_, PyAny>) -> Result<Complex<$float>, Self::Error> {
                 #[cfg(not(any(Py_LIMITED_API, PyPy)))]
                 unsafe {
                     let val = ffi::PyComplex_AsCComplex(obj.as_ptr());
@@ -163,6 +176,7 @@ macro_rules! complex_conversion {
 
                 #[cfg(any(Py_LIMITED_API, PyPy))]
                 unsafe {
+                    use $crate::types::any::PyAnyMethods;
                     let complex;
                     let obj = if obj.is_instance_of::<PyComplex>() {
                         obj
@@ -170,7 +184,7 @@ macro_rules! complex_conversion {
                         obj.lookup_special(crate::intern!(obj.py(), "__complex__"))?
                     {
                         complex = method.call0()?;
-                        &complex
+                        complex.as_borrowed()
                     } else {
                         // `obj` might still implement `__float__` or `__index__`, which will be
                         // handled by `PyComplex_{Real,Imag}AsDouble`, including propagating any
@@ -197,10 +211,10 @@ complex_conversion!(f64);
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::tests::common::generate_unique_module_name;
+    use crate::test_utils::generate_unique_module_name;
+    use crate::types::PyAnyMethods as _;
     use crate::types::{complex::PyComplexMethods, PyModule};
     use crate::IntoPyObject;
-    use pyo3_ffi::c_str;
 
     #[test]
     fn from_complex() {
@@ -231,17 +245,15 @@ mod tests {
         Python::attach(|py| {
             let module = PyModule::from_code(
                 py,
-                c_str!(
-                    r#"
+                cr#"
 class A:
     def __complex__(self): return 3.0+1.2j
 class B:
     def __float__(self): return 3.0
 class C:
     def __index__(self): return 3
-                "#
-                ),
-                c_str!("test.py"),
+                "#,
+                c"test.py",
                 &generate_unique_module_name("test"),
             )
             .unwrap();
@@ -255,15 +267,11 @@ class C:
                 from_float.extract::<Complex<f64>>().unwrap(),
                 Complex::new(3.0, 0.0)
             );
-            // Before Python 3.8, `__index__` wasn't tried by `float`/`complex`.
-            #[cfg(Py_3_8)]
-            {
-                let from_index = module.getattr("C").unwrap().call0().unwrap();
-                assert_eq!(
-                    from_index.extract::<Complex<f64>>().unwrap(),
-                    Complex::new(3.0, 0.0)
-                );
-            }
+            let from_index = module.getattr("C").unwrap().call0().unwrap();
+            assert_eq!(
+                from_index.extract::<Complex<f64>>().unwrap(),
+                Complex::new(3.0, 0.0)
+            );
         })
     }
     #[test]
@@ -271,8 +279,7 @@ class C:
         Python::attach(|py| {
             let module = PyModule::from_code(
                 py,
-                c_str!(
-                    r#"
+                cr#"
 class First: pass
 class ComplexMixin:
     def __complex__(self): return 3.0+1.2j
@@ -283,9 +290,8 @@ class IndexMixin:
 class A(First, ComplexMixin): pass
 class B(First, FloatMixin): pass
 class C(First, IndexMixin): pass
-                "#
-                ),
-                c_str!("test.py"),
+                "#,
+                c"test.py",
                 &generate_unique_module_name("test"),
             )
             .unwrap();
@@ -299,14 +305,11 @@ class C(First, IndexMixin): pass
                 from_float.extract::<Complex<f64>>().unwrap(),
                 Complex::new(3.0, 0.0)
             );
-            #[cfg(Py_3_8)]
-            {
-                let from_index = module.getattr("C").unwrap().call0().unwrap();
-                assert_eq!(
-                    from_index.extract::<Complex<f64>>().unwrap(),
-                    Complex::new(3.0, 0.0)
-                );
-            }
+            let from_index = module.getattr("C").unwrap().call0().unwrap();
+            assert_eq!(
+                from_index.extract::<Complex<f64>>().unwrap(),
+                Complex::new(3.0, 0.0)
+            );
         })
     }
     #[test]
@@ -317,15 +320,13 @@ class C(First, IndexMixin): pass
         Python::attach(|py| {
             let module = PyModule::from_code(
                 py,
-                c_str!(
-                    r#"
+                cr#"
 class A:
     @property
     def __complex__(self):
         return lambda: 3.0+1.2j
-                "#
-                ),
-                c_str!("test.py"),
+                "#,
+                c"test.py",
                 &generate_unique_module_name("test"),
             )
             .unwrap();
@@ -342,15 +343,13 @@ class A:
         Python::attach(|py| {
             let module = PyModule::from_code(
                 py,
-                c_str!(
-                    r#"
+                cr#"
 class MyComplex:
     def __call__(self): return 3.0+1.2j
 class A:
     __complex__ = MyComplex()
-                "#
-                ),
-                c_str!("test.py"),
+                "#,
+                c"test.py",
                 &generate_unique_module_name("test"),
             )
             .unwrap();

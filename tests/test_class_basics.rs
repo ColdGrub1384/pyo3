@@ -1,11 +1,12 @@
 #![cfg(feature = "macros")]
 
 use pyo3::prelude::*;
+use pyo3::py_run;
 use pyo3::types::PyType;
-use pyo3::{py_run, PyClass};
+#[cfg(not(target_arch = "wasm32"))]
+use pyo3::PyClass;
 
-#[path = "../src/tests/common.rs"]
-mod common;
+mod test_utils;
 
 #[pyclass]
 struct EmptyClass {}
@@ -51,7 +52,6 @@ struct ClassWithDocs {
 
     /// Write-only property field
     #[pyo3(set)]
-    #[allow(dead_code)] // Rust detects field is never read
     writeonly: i32,
 }
 
@@ -207,13 +207,13 @@ struct ClassWithObjectField {
     // It used to be that PyObject was not supported with (get, set)
     // - this test is just ensuring it compiles.
     #[pyo3(get, set)]
-    value: PyObject,
+    value: Py<PyAny>,
 }
 
 #[pymethods]
 impl ClassWithObjectField {
     #[new]
-    fn new(value: PyObject) -> ClassWithObjectField {
+    fn new(value: Py<PyAny>) -> ClassWithObjectField {
         Self { value }
     }
 }
@@ -287,6 +287,7 @@ impl UnsendableChild {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 fn test_unsendable<T: PyClass + 'static>() -> PyResult<()> {
     let (keep_obj_here, obj) = Python::attach(|py| -> PyResult<_> {
         let obj: Py<T> = PyType::new::<T>(py).call1((5,))?.extract()?;
@@ -325,7 +326,7 @@ fn test_unsendable<T: PyClass + 'static>() -> PyResult<()> {
 
 /// If a class is marked as `unsendable`, it panics when accessed by another thread.
 #[test]
-#[cfg_attr(target_arch = "wasm32", ignore)]
+#[cfg(not(target_arch = "wasm32"))]
 #[should_panic(
     expected = "test_class_basics::UnsendableBase is unsendable, but sent to another thread"
 )]
@@ -334,7 +335,7 @@ fn panic_unsendable_base() {
 }
 
 #[test]
-#[cfg_attr(target_arch = "wasm32", ignore)]
+#[cfg(not(target_arch = "wasm32"))]
 #[should_panic(
     expected = "test_class_basics::UnsendableBase is unsendable, but sent to another thread"
 )]
@@ -616,15 +617,14 @@ fn access_frozen_class_without_gil() {
 }
 
 #[test]
-#[cfg(all(Py_3_8, not(Py_GIL_DISABLED)))] // sys.unraisablehook not available until Python 3.8
 #[cfg_attr(target_arch = "wasm32", ignore)]
 fn drop_unsendable_elsewhere() {
-    use common::UnraisableCapture;
     use std::sync::{
         atomic::{AtomicBool, Ordering},
         Arc,
     };
     use std::thread::spawn;
+    use test_utils::UnraisableCapture;
 
     #[pyclass(unsendable)]
     struct Unsendable {
@@ -638,35 +638,39 @@ fn drop_unsendable_elsewhere() {
     }
 
     Python::attach(|py| {
-        let capture = UnraisableCapture::install(py);
+        let (err, object) = UnraisableCapture::enter(py, |capture| {
+            let dropped = Arc::new(AtomicBool::new(false));
 
-        let dropped = Arc::new(AtomicBool::new(false));
-
-        let unsendable = Py::new(
-            py,
-            Unsendable {
-                dropped: dropped.clone(),
-            },
-        )
-        .unwrap();
-
-        py.allow_threads(|| {
-            spawn(move || {
-                Python::attach(move |_py| {
-                    drop(unsendable);
-                });
-            })
-            .join()
+            let unsendable = Py::new(
+                py,
+                Unsendable {
+                    dropped: dropped.clone(),
+                },
+            )
             .unwrap();
+
+            py.detach(|| {
+                spawn(move || {
+                    Python::attach(move |py| {
+                        drop(unsendable);
+                        // On the free-threaded build, dropping an object on its non-origin thread
+                        // will not immediately drop it because the refcounts need to be merged.
+                        //
+                        // Force GC to ensure the drop happens now on the wrong thread.
+                        py.run(c"import gc; gc.collect()", None, None).unwrap();
+                    });
+                })
+                .join()
+                .unwrap();
+            });
+
+            assert!(!dropped.load(Ordering::SeqCst));
+
+            capture.take_capture().unwrap()
         });
 
-        assert!(!dropped.load(Ordering::SeqCst));
-
-        let (err, object) = capture.borrow_mut(py).capture.take().unwrap();
         assert_eq!(err.to_string(), "RuntimeError: test_class_basics::drop_unsendable_elsewhere::Unsendable is unsendable, but is being dropped on another thread");
-        assert!(object.is_none(py));
-
-        capture.borrow_mut(py).uninstall(py);
+        assert!(object.is_none());
     });
 }
 
@@ -719,14 +723,14 @@ fn test_unsendable_dict_with_weakref() {
 #[pyclass(generic)]
 struct ClassWithRuntimeParametrization {
     #[pyo3(get, set)]
-    value: PyObject,
+    value: Py<PyAny>,
 }
 
 #[cfg(Py_3_9)]
 #[pymethods]
 impl ClassWithRuntimeParametrization {
     #[new]
-    fn new(value: PyObject) -> ClassWithRuntimeParametrization {
+    fn new(value: Py<PyAny>) -> ClassWithRuntimeParametrization {
         Self { value }
     }
 }

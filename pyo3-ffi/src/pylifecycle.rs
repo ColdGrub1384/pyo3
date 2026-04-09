@@ -1,9 +1,9 @@
-use crate::pystate::PyThreadState;
+use crate::pytypedefs::PyThreadState;
 
 use libc::wchar_t;
-use std::os::raw::{c_char, c_int};
+use std::ffi::{c_char, c_int};
 
-extern "C" {
+extern_libpython! {
     pub fn Py_Initialize();
     pub fn Py_InitializeEx(arg1: c_int);
     pub fn Py_Finalize();
@@ -18,7 +18,7 @@ extern "C" {
     #[cfg_attr(PyPy, link_name = "PyPy_AtExit")]
     pub fn Py_AtExit(func: Option<extern "C" fn()>) -> c_int;
 
-    pub fn Py_Exit(arg1: c_int);
+    pub fn Py_Exit(arg1: c_int) -> !;
 
     pub fn Py_Main(argc: c_int, argv: *mut *mut wchar_t) -> c_int;
     pub fn Py_BytesMain(argc: c_int, argv: *mut *mut c_char) -> c_int;
@@ -86,7 +86,13 @@ extern "C" {
 
 type PyOS_sighandler_t = unsafe extern "C" fn(arg1: c_int);
 
-extern "C" {
+extern_libpython! {
     pub fn PyOS_getsig(arg1: c_int) -> PyOS_sighandler_t;
     pub fn PyOS_setsig(arg1: c_int, arg2: PyOS_sighandler_t) -> PyOS_sighandler_t;
+
+    #[cfg(Py_3_11)]
+    pub static Py_Version: std::ffi::c_ulong;
+
+    #[cfg(Py_3_13)]
+    pub fn Py_IsFinalizing() -> c_int;
 }

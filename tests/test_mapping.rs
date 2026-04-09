@@ -10,8 +10,7 @@ use pyo3::types::PyList;
 use pyo3::types::PyMapping;
 use pyo3::types::PySequence;
 
-#[path = "../src/tests/common.rs"]
-mod common;
+mod test_utils;
 
 #[pyclass(mapping)]
 struct Mapping {
@@ -65,8 +64,8 @@ impl Mapping {
         &self,
         py: Python<'_>,
         key: &str,
-        default: Option<PyObject>,
-    ) -> PyResult<Option<PyObject>> {
+        default: Option<Py<PyAny>>,
+    ) -> PyResult<Option<Py<PyAny>>> {
         match self.index.get(key) {
             Some(value) => Ok(Some(value.into_pyobject(py)?.into_any().unbind())),
             None => Ok(default),
@@ -132,7 +131,7 @@ fn mapping_is_not_sequence() {
 
         PyMapping::register::<Mapping>(py).unwrap();
 
-        assert!(m.bind(py).downcast::<PyMapping>().is_ok());
-        assert!(m.bind(py).downcast::<PySequence>().is_err());
+        assert!(m.bind(py).cast::<PyMapping>().is_ok());
+        assert!(m.bind(py).cast::<PySequence>().is_err());
     });
 }

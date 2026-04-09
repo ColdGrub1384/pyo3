@@ -1,20 +1,18 @@
-#[cfg(not(GraalPy))]
+#[cfg(all(not(GraalPy), not(all(Py_3_13, Py_LIMITED_API))))]
 use crate::longobject::PyLongObject;
 use crate::object::*;
-use std::os::raw::{c_int, c_long};
-use std::ptr::addr_of_mut;
+use std::ffi::{c_int, c_long};
 
 #[inline]
 pub unsafe fn PyBool_Check(op: *mut PyObject) -> c_int {
-    (Py_TYPE(op) == addr_of_mut!(PyBool_Type)) as c_int
+    (Py_TYPE(op) == &raw mut PyBool_Type) as c_int
 }
 
-#[cfg_attr(windows, link(name = "pythonXY"))]
-extern "C" {
-    #[cfg(not(GraalPy))]
+extern_libpython! {
+    #[cfg(all(not(GraalPy), not(all(Py_3_13, Py_LIMITED_API))))]
     #[cfg_attr(PyPy, link_name = "_PyPy_FalseStruct")]
     static mut _Py_FalseStruct: PyLongObject;
-    #[cfg(not(GraalPy))]
+    #[cfg(all(not(GraalPy), not(all(Py_3_13, Py_LIMITED_API))))]
     #[cfg_attr(PyPy, link_name = "_PyPy_TrueStruct")]
     static mut _Py_TrueStruct: PyLongObject;
 
@@ -26,16 +24,24 @@ extern "C" {
 
 #[inline]
 pub unsafe fn Py_False() -> *mut PyObject {
-    #[cfg(not(GraalPy))]
-    return addr_of_mut!(_Py_FalseStruct) as *mut PyObject;
+    #[cfg(all(not(GraalPy), all(Py_3_13, Py_LIMITED_API)))]
+    return Py_GetConstantBorrowed(Py_CONSTANT_FALSE);
+
+    #[cfg(all(not(GraalPy), not(all(Py_3_13, Py_LIMITED_API))))]
+    return (&raw mut _Py_FalseStruct).cast();
+
     #[cfg(GraalPy)]
     return _Py_FalseStructReference;
 }
 
 #[inline]
 pub unsafe fn Py_True() -> *mut PyObject {
-    #[cfg(not(GraalPy))]
-    return addr_of_mut!(_Py_TrueStruct) as *mut PyObject;
+    #[cfg(all(not(GraalPy), all(Py_3_13, Py_LIMITED_API)))]
+    return Py_GetConstantBorrowed(Py_CONSTANT_TRUE);
+
+    #[cfg(all(not(GraalPy), not(all(Py_3_13, Py_LIMITED_API))))]
+    return (&raw mut _Py_TrueStruct).cast();
+
     #[cfg(GraalPy)]
     return _Py_TrueStructReference;
 }
@@ -53,8 +59,7 @@ pub unsafe fn Py_IsFalse(x: *mut PyObject) -> c_int {
 // skipped Py_RETURN_TRUE
 // skipped Py_RETURN_FALSE
 
-#[cfg_attr(windows, link(name = "pythonXY"))]
-extern "C" {
+extern_libpython! {
     #[cfg_attr(PyPy, link_name = "PyPyBool_FromLong")]
     pub fn PyBool_FromLong(arg1: c_long) -> *mut PyObject;
 }

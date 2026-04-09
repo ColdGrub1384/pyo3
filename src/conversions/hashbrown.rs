@@ -16,28 +16,33 @@
 //!
 //! Note that you must use compatible versions of hashbrown and PyO3.
 //! The required hashbrown version may vary based on the version of PyO3.
+#[cfg(feature = "experimental-inspect")]
+use crate::inspect::PyStaticExpr;
 use crate::{
-    conversion::IntoPyObject,
+    conversion::{FromPyObjectOwned, IntoPyObject},
     types::{
-        any::PyAnyMethods,
-        dict::PyDictMethods,
-        frozenset::PyFrozenSetMethods,
-        set::{try_new_from_iter, PySetMethods},
+        any::PyAnyMethods, dict::PyDictMethods, frozenset::PyFrozenSetMethods, set::PySetMethods,
         PyDict, PyFrozenSet, PySet,
     },
-    Bound, FromPyObject, PyAny, PyErr, PyResult, Python,
+    Borrowed, Bound, FromPyObject, PyAny, PyErr, PyResult, Python,
 };
-use std::{cmp, hash};
+#[cfg(feature = "experimental-inspect")]
+use crate::{type_hint_subscript, type_hint_union, PyTypeInfo};
+use std::hash;
 
 impl<'py, K, V, H> IntoPyObject<'py> for hashbrown::HashMap<K, V, H>
 where
-    K: IntoPyObject<'py> + cmp::Eq + hash::Hash,
+    K: IntoPyObject<'py> + Eq + hash::Hash,
     V: IntoPyObject<'py>,
     H: hash::BuildHasher,
 {
     type Target = PyDict;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr =
+        type_hint_subscript!(PyDict::TYPE_HINT, K::OUTPUT_TYPE, V::OUTPUT_TYPE);
 
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let dict = PyDict::new(py);
@@ -50,13 +55,17 @@ where
 
 impl<'a, 'py, K, V, H> IntoPyObject<'py> for &'a hashbrown::HashMap<K, V, H>
 where
-    &'a K: IntoPyObject<'py> + cmp::Eq + hash::Hash,
+    &'a K: IntoPyObject<'py> + Eq + hash::Hash,
     &'a V: IntoPyObject<'py>,
     H: hash::BuildHasher,
 {
     type Target = PyDict;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr =
+        type_hint_subscript!(PyDict::TYPE_HINT, <&K>::OUTPUT_TYPE, <&V>::OUTPUT_TYPE);
 
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let dict = PyDict::new(py);
@@ -67,17 +76,26 @@ where
     }
 }
 
-impl<'py, K, V, S> FromPyObject<'py> for hashbrown::HashMap<K, V, S>
+impl<'py, K, V, S> FromPyObject<'_, 'py> for hashbrown::HashMap<K, V, S>
 where
-    K: FromPyObject<'py> + cmp::Eq + hash::Hash,
-    V: FromPyObject<'py>,
+    K: FromPyObjectOwned<'py> + Eq + hash::Hash,
+    V: FromPyObjectOwned<'py>,
     S: hash::BuildHasher + Default,
 {
-    fn extract_bound(ob: &Bound<'py, PyAny>) -> Result<Self, PyErr> {
-        let dict = ob.downcast::<PyDict>()?;
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr =
+        type_hint_subscript!(PyDict::TYPE_HINT, K::INPUT_TYPE, V::INPUT_TYPE);
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> Result<Self, PyErr> {
+        let dict = ob.cast::<PyDict>()?;
         let mut ret = hashbrown::HashMap::with_capacity_and_hasher(dict.len(), S::default());
-        for (k, v) in dict {
-            ret.insert(k.extract()?, v.extract()?);
+        for (k, v) in dict.iter() {
+            ret.insert(
+                k.extract().map_err(Into::into)?,
+                v.extract().map_err(Into::into)?,
+            );
         }
         Ok(ret)
     }
@@ -85,43 +103,63 @@ where
 
 impl<'py, K, H> IntoPyObject<'py> for hashbrown::HashSet<K, H>
 where
-    K: IntoPyObject<'py> + cmp::Eq + hash::Hash,
+    K: IntoPyObject<'py> + Eq + hash::Hash,
     H: hash::BuildHasher,
 {
     type Target = PySet;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = type_hint_subscript!(PySet::TYPE_HINT, K::OUTPUT_TYPE);
+
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
-        try_new_from_iter(py, self)
+        PySet::new(py, self)
     }
 }
 
 impl<'a, 'py, K, H> IntoPyObject<'py> for &'a hashbrown::HashSet<K, H>
 where
-    &'a K: IntoPyObject<'py> + cmp::Eq + hash::Hash,
+    &'a K: IntoPyObject<'py> + Eq + hash::Hash,
     H: hash::BuildHasher,
 {
     type Target = PySet;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = type_hint_subscript!(PySet::TYPE_HINT, <&K>::OUTPUT_TYPE);
+
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
-        try_new_from_iter(py, self)
+        PySet::new(py, self)
     }
 }
 
-impl<'py, K, S> FromPyObject<'py> for hashbrown::HashSet<K, S>
+impl<'py, K, S> FromPyObject<'_, 'py> for hashbrown::HashSet<K, S>
 where
-    K: FromPyObject<'py> + cmp::Eq + hash::Hash,
+    K: FromPyObjectOwned<'py> + Eq + hash::Hash,
     S: hash::BuildHasher + Default,
 {
-    fn extract_bound(ob: &Bound<'py, PyAny>) -> PyResult<Self> {
-        match ob.downcast::<PySet>() {
-            Ok(set) => set.iter().map(|any| any.extract()).collect(),
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr = type_hint_union!(
+        type_hint_subscript!(PySet::TYPE_HINT, K::INPUT_TYPE),
+        type_hint_subscript!(PyFrozenSet::TYPE_HINT, K::INPUT_TYPE)
+    );
+
+    fn extract(ob: Borrowed<'_, 'py, PyAny>) -> PyResult<Self> {
+        match ob.cast::<PySet>() {
+            Ok(set) => set
+                .iter()
+                .map(|any| any.extract().map_err(Into::into))
+                .collect(),
             Err(err) => {
-                if let Ok(frozen_set) = ob.downcast::<PyFrozenSet>() {
-                    frozen_set.iter().map(|any| any.extract()).collect()
+                if let Ok(frozen_set) = ob.cast::<PyFrozenSet>() {
+                    frozen_set
+                        .iter()
+                        .map(|any| any.extract().map_err(Into::into))
+                        .collect()
                 } else {
                     Err(PyErr::from(err))
                 }
@@ -145,7 +183,7 @@ mod tests {
 
             let py_map = (&map).into_pyobject(py).unwrap();
 
-            assert!(py_map.len() == 1);
+            assert_eq!(py_map.len(), 1);
             assert!(
                 py_map
                     .get_item(1)

@@ -53,15 +53,22 @@
 
 use crate::conversion::IntoPyObject;
 use crate::exceptions::PyValueError;
-use crate::types::{any::PyAnyMethods, PyFloat};
-use crate::{Bound, FromPyObject, PyAny, PyResult, Python};
+#[cfg(feature = "experimental-inspect")]
+use crate::inspect::PyStaticExpr;
+use crate::types::PyFloat;
+use crate::{Borrowed, Bound, FromPyObject, PyAny, Python};
 use ordered_float::{NotNan, OrderedFloat};
 use std::convert::Infallible;
 
 macro_rules! float_conversions {
     ($wrapper:ident, $float_type:ty, $constructor:expr) => {
-        impl FromPyObject<'_> for $wrapper<$float_type> {
-            fn extract_bound(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+        impl<'a, 'py> FromPyObject<'a, 'py> for $wrapper<$float_type> {
+            type Error = <$float_type as FromPyObject<'a, 'py>>::Error;
+
+            #[cfg(feature = "experimental-inspect")]
+            const INPUT_TYPE: PyStaticExpr = <$float_type>::INPUT_TYPE;
+
+            fn extract(obj: Borrowed<'a, 'py, PyAny>) -> Result<Self, Self::Error> {
                 let val: $float_type = obj.extract()?;
                 $constructor(val)
             }
@@ -72,6 +79,9 @@ macro_rules! float_conversions {
             type Output = Bound<'py, Self::Target>;
             type Error = Infallible;
 
+            #[cfg(feature = "experimental-inspect")]
+            const OUTPUT_TYPE: PyStaticExpr = <$float_type>::OUTPUT_TYPE;
+
             fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
                 self.into_inner().into_pyobject(py)
             }
@@ -81,6 +91,9 @@ macro_rules! float_conversions {
             type Target = PyFloat;
             type Output = Bound<'py, Self::Target>;
             type Error = Infallible;
+
+            #[cfg(feature = "experimental-inspect")]
+            const OUTPUT_TYPE: PyStaticExpr = <$wrapper<$float_type>>::OUTPUT_TYPE;
 
             #[inline]
             fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
@@ -99,11 +112,18 @@ float_conversions!(NotNan, f64, |val| NotNan::new(val)
 #[cfg(test)]
 mod test_ordered_float {
     use super::*;
-    use crate::ffi::c_str;
-    use crate::py_run;
+    use crate::types::dict::IntoPyDict;
+    use crate::types::PyAnyMethods;
+    use std::ffi::CStr;
+    use std::ffi::CString;
 
     #[cfg(not(target_arch = "wasm32"))]
     use proptest::prelude::*;
+
+    fn py_run<'py>(py: Python<'py>, script: &CStr, locals: impl IntoPyDict<'py>) {
+        py.run(script, None, Some(&locals.into_py_dict(py).unwrap()))
+            .unwrap()
+    }
 
     macro_rules! float_roundtrip_tests {
         ($wrapper:ident, $float_type:ty, $constructor:expr, $standard_test:ident, $wasm_test:ident, $infinity_test:ident, $zero_test:ident) => {
@@ -116,15 +136,11 @@ mod test_ordered_float {
                 Python::attach(|py| {
                     let f_py: Bound<'_, PyFloat>  = f.into_pyobject(py).unwrap();
 
-                    py_run!(
-                        py,
-                        f_py,
-                        &format!(
+                    py_run(py, &CString::new(format!(
                             "import math\nassert math.isclose(f_py, {})",
                              inner_f as f64 // Always interpret the literal rs float value as f64
                                             // so that it's comparable with the python float
-                        )
-                    );
+                        )).unwrap(), [("f_py", &f_py)]);
 
                     let roundtripped_f: $wrapper<$float_type> = f_py.extract().unwrap();
 
@@ -140,16 +156,17 @@ mod test_ordered_float {
                 let f = $constructor(inner_f);
 
                 Python::attach(|py| {
-                    let f_py: Bound<'_, PyFloat>  = f.into_pyobject(py).unwrap();
+                    let f_py: Bound<'_, PyFloat> = f.into_pyobject(py).unwrap();
 
-                    py_run!(
+                    py_run(
                         py,
-                        f_py,
-                        &format!(
+                        &CString::new(format!(
                             "import math\nassert math.isclose(f_py, {})",
                             inner_f as f64 // Always interpret the literal rs float value as f64
                                            // so that it's comparable with the python float
-                        )
+                        ))
+                        .unwrap(),
+                        [("f_py", &f_py)],
                     );
 
                     let roundtripped_f: $wrapper<$float_type> = f_py.extract().unwrap();
@@ -167,15 +184,15 @@ mod test_ordered_float {
                 let ninf = $constructor(inner_ninf);
 
                 Python::attach(|py| {
-                    let pinf_py: Bound<'_, PyFloat>  = pinf.into_pyobject(py).unwrap();
-                    let ninf_py: Bound<'_, PyFloat>  = ninf.into_pyobject(py).unwrap();
+                    let pinf_py: Bound<'_, PyFloat> = pinf.into_pyobject(py).unwrap();
+                    let ninf_py: Bound<'_, PyFloat> = ninf.into_pyobject(py).unwrap();
 
-                    py_run!(
+                    py_run(
                         py,
-                        pinf_py ninf_py,
-                        "\
+                        c"\
                         assert pinf_py == float('inf')\n\
-                        assert ninf_py == float('-inf')"
+                        assert ninf_py == float('-inf')",
+                        [("pinf_py", &pinf_py), ("ninf_py", &ninf_py)],
                     );
 
                     let roundtripped_pinf: $wrapper<$float_type> = pinf_py.extract().unwrap();
@@ -195,20 +212,20 @@ mod test_ordered_float {
                 let nzero = $constructor(inner_nzero);
 
                 Python::attach(|py| {
-                    let pzero_py: Bound<'_, PyFloat>  = pzero.into_pyobject(py).unwrap();
-                    let nzero_py: Bound<'_, PyFloat>  = nzero.into_pyobject(py).unwrap();
+                    let pzero_py: Bound<'_, PyFloat> = pzero.into_pyobject(py).unwrap();
+                    let nzero_py: Bound<'_, PyFloat> = nzero.into_pyobject(py).unwrap();
 
                     // This python script verifies that the values are 0.0 in magnitude
                     // and that the signs are correct(+0.0 vs -0.0)
-                    py_run!(
+                    py_run(
                         py,
-                        pzero_py nzero_py,
-                        "\
+                        c"\
                         import math\n\
                         assert pzero_py == 0.0\n\
                         assert math.copysign(1.0, pzero_py) > 0.0\n\
                         assert nzero_py == 0.0\n\
-                        assert math.copysign(1.0, nzero_py) < 0.0"
+                        assert math.copysign(1.0, nzero_py) < 0.0",
+                        [("pzero_py", &pzero_py), ("nzero_py", &nzero_py)],
                     );
 
                     let roundtripped_pzero: $wrapper<$float_type> = pzero_py.extract().unwrap();
@@ -269,12 +286,10 @@ mod test_ordered_float {
                 Python::attach(|py| {
                     let nan_py: Bound<'_, PyFloat> = nan.into_pyobject(py).unwrap();
 
-                    py_run!(
+                    py_run(
                         py,
-                        nan_py,
-                        "\
-                        import math\n\
-                        assert math.isnan(nan_py)"
+                        c"import math\nassert math.isnan(nan_py)",
+                        [("nan_py", &nan_py)],
                     );
 
                     let roundtripped_nan: OrderedFloat<$float_type> = nan_py.extract().unwrap();
@@ -292,9 +307,9 @@ mod test_ordered_float {
             #[test]
             fn $test_name() {
                 Python::attach(|py| {
-                    let nan_py = py.eval(c_str!("float('nan')"), None, None).unwrap();
+                    let nan_py = py.eval(c"float('nan')", None, None).unwrap();
 
-                    let nan_rs: PyResult<NotNan<$float_type>> = nan_py.extract();
+                    let nan_rs: Result<NotNan<$float_type>, _> = nan_py.extract();
 
                     assert!(nan_rs.is_err());
                 })

@@ -2,7 +2,7 @@
 
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::sync::GILOnceCell;
+use pyo3::sync::PyOnceLock;
 use pyo3::types::IntoPyDict;
 
 #[pyclass]
@@ -23,7 +23,7 @@ fn empty_class_with_new() {
         assert!(typeobj
             .call((), None)
             .unwrap()
-            .downcast::<EmptyClassWithNew>()
+            .cast::<EmptyClassWithNew>()
             .is_ok());
 
         // Calling with arbitrary args or kwargs is not ok
@@ -52,7 +52,7 @@ fn unit_class_with_new() {
         assert!(typeobj
             .call((), None)
             .unwrap()
-            .downcast::<UnitClassWithNew>()
+            .cast::<UnitClassWithNew>()
             .is_ok());
     });
 }
@@ -73,7 +73,7 @@ fn tuple_class_with_new() {
     Python::attach(|py| {
         let typeobj = py.get_type::<TupleClassWithNew>();
         let wrp = typeobj.call((42,), None).unwrap();
-        let obj = wrp.downcast::<TupleClassWithNew>().unwrap();
+        let obj = wrp.cast::<TupleClassWithNew>().unwrap();
         let obj_ref = obj.borrow();
         assert_eq!(obj_ref.0, 42);
     });
@@ -98,7 +98,7 @@ fn new_with_one_arg() {
     Python::attach(|py| {
         let typeobj = py.get_type::<NewWithOneArg>();
         let wrp = typeobj.call((42,), None).unwrap();
-        let obj = wrp.downcast::<NewWithOneArg>().unwrap();
+        let obj = wrp.cast::<NewWithOneArg>().unwrap();
         let obj_ref = obj.borrow();
         assert_eq!(obj_ref.data, 42);
     });
@@ -129,7 +129,7 @@ fn new_with_two_args() {
             .call((10, 20), None)
             .map_err(|e| e.display(py))
             .unwrap();
-        let obj = wrp.downcast::<NewWithTwoArgs>().unwrap();
+        let obj = wrp.cast::<NewWithTwoArgs>().unwrap();
         let obj_ref = obj.borrow();
         assert_eq!(obj_ref.data1, 10);
         assert_eq!(obj_ref.data2, 20);
@@ -156,7 +156,7 @@ impl SuperClass {
 fn subclass_new() {
     Python::attach(|py| {
         let super_cls = py.get_type::<SuperClass>();
-        let source = pyo3_ffi::c_str!(pyo3::indoc::indoc!(
+        let source = pyo3_ffi::c_str!(
             r#"
 class Class(SuperClass):
     def __new__(cls):
@@ -168,7 +168,7 @@ class Class(SuperClass):
 c = Class()
 assert c.from_rust is False
 "#
-        ));
+        );
         let globals = PyModule::import(py, "__main__").unwrap().dict();
         globals.set_item("SuperClass", super_cls).unwrap();
         py.run(source, Some(&globals), None)
@@ -216,7 +216,7 @@ struct NewExisting {
 impl NewExisting {
     #[new]
     fn new(py: pyo3::Python<'_>, val: usize) -> pyo3::Py<NewExisting> {
-        static PRE_BUILT: GILOnceCell<[pyo3::Py<NewExisting>; 2]> = GILOnceCell::new();
+        static PRE_BUILT: PyOnceLock<[pyo3::Py<NewExisting>; 2]> = PyOnceLock::new();
         let existing = PRE_BUILT.get_or_init(py, || {
             [
                 pyo3::Py::new(py, NewExisting { num: 0 }).unwrap(),
@@ -244,12 +244,12 @@ fn test_new_existing() {
         let obj5 = typeobj.call1((2,)).unwrap();
         let obj6 = typeobj.call1((2,)).unwrap();
 
-        assert!(obj1.getattr("num").unwrap().extract::<u32>().unwrap() == 0);
-        assert!(obj2.getattr("num").unwrap().extract::<u32>().unwrap() == 0);
-        assert!(obj3.getattr("num").unwrap().extract::<u32>().unwrap() == 1);
-        assert!(obj4.getattr("num").unwrap().extract::<u32>().unwrap() == 1);
-        assert!(obj5.getattr("num").unwrap().extract::<u32>().unwrap() == 2);
-        assert!(obj6.getattr("num").unwrap().extract::<u32>().unwrap() == 2);
+        assert_eq!(obj1.getattr("num").unwrap().extract::<u32>().unwrap(), 0);
+        assert_eq!(obj2.getattr("num").unwrap().extract::<u32>().unwrap(), 0);
+        assert_eq!(obj3.getattr("num").unwrap().extract::<u32>().unwrap(), 1);
+        assert_eq!(obj4.getattr("num").unwrap().extract::<u32>().unwrap(), 1);
+        assert_eq!(obj5.getattr("num").unwrap().extract::<u32>().unwrap(), 2);
+        assert_eq!(obj6.getattr("num").unwrap().extract::<u32>().unwrap(), 2);
 
         assert!(obj1.is(&obj2));
         assert!(obj3.is(&obj4));
@@ -302,7 +302,7 @@ fn test_new_returns_bound() {
 #[pyo3::pyclass]
 struct NewClassMethod {
     #[pyo3(get)]
-    cls: pyo3::PyObject,
+    cls: pyo3::Py<PyAny>,
 }
 
 #[pyo3::pymethods]

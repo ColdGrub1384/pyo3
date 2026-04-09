@@ -51,16 +51,25 @@
 
 use crate::conversion::IntoPyObject;
 use crate::exceptions::PyValueError;
-use crate::sync::GILOnceCell;
+#[cfg(feature = "experimental-inspect")]
+use crate::inspect::PyStaticExpr;
+use crate::sync::PyOnceLock;
+#[cfg(feature = "experimental-inspect")]
+use crate::type_hint_identifier;
 use crate::types::any::PyAnyMethods;
 use crate::types::string::PyStringMethods;
 use crate::types::PyType;
-use crate::{Bound, FromPyObject, Py, PyAny, PyErr, PyResult, Python};
+use crate::{Borrowed, Bound, FromPyObject, Py, PyAny, PyErr, PyResult, Python};
 use rust_decimal::Decimal;
 use std::str::FromStr;
 
-impl FromPyObject<'_> for Decimal {
-    fn extract_bound(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+impl FromPyObject<'_, '_> for Decimal {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr = type_hint_identifier!("decimal", "Decimal");
+
+    fn extract(obj: Borrowed<'_, '_, PyAny>) -> Result<Self, Self::Error> {
         // use the string representation to not be lossy
         if let Ok(val) = obj.extract() {
             Ok(Decimal::new(val, 0))
@@ -74,7 +83,7 @@ impl FromPyObject<'_> for Decimal {
     }
 }
 
-static DECIMAL_CLS: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+static DECIMAL_CLS: PyOnceLock<Py<PyType>> = PyOnceLock::new();
 
 fn get_decimal_cls(py: Python<'_>) -> PyResult<&Bound<'_, PyType>> {
     DECIMAL_CLS.import(py, "decimal", "Decimal")
@@ -84,6 +93,9 @@ impl<'py> IntoPyObject<'py> for Decimal {
     type Target = PyAny;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = type_hint_identifier!("decimal", "Decimal");
 
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         let dec_cls = get_decimal_cls(py)?;
@@ -98,6 +110,9 @@ impl<'py> IntoPyObject<'py> for &Decimal {
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = Decimal::OUTPUT_TYPE;
+
     #[inline]
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         (*self).into_pyobject(py)
@@ -111,7 +126,6 @@ mod test_rust_decimal {
     use crate::types::PyDict;
     use std::ffi::CString;
 
-    use crate::ffi;
     #[cfg(not(target_arch = "wasm32"))]
     use proptest::prelude::*;
 
@@ -192,7 +206,7 @@ mod test_rust_decimal {
         Python::attach(|py| {
             let locals = PyDict::new(py);
             py.run(
-                ffi::c_str!("import decimal\npy_dec = decimal.Decimal(\"NaN\")"),
+                c"import decimal\npy_dec = decimal.Decimal(\"NaN\")",
                 None,
                 Some(&locals),
             )
@@ -208,7 +222,7 @@ mod test_rust_decimal {
         Python::attach(|py| {
             let locals = PyDict::new(py);
             py.run(
-                ffi::c_str!("import decimal\npy_dec = decimal.Decimal(\"1e3\")"),
+                c"import decimal\npy_dec = decimal.Decimal(\"1e3\")",
                 None,
                 Some(&locals),
             )
@@ -225,7 +239,7 @@ mod test_rust_decimal {
         Python::attach(|py| {
             let locals = PyDict::new(py);
             py.run(
-                ffi::c_str!("import decimal\npy_dec = decimal.Decimal(\"Infinity\")"),
+                c"import decimal\npy_dec = decimal.Decimal(\"Infinity\")",
                 None,
                 Some(&locals),
             )

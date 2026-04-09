@@ -1,11 +1,13 @@
+use super::PyWeakrefMethods;
 use crate::err::PyResult;
 use crate::ffi_ptr_ext::FfiPtrExt;
+#[cfg(feature = "experimental-inspect")]
+use crate::inspect::{type_hint_identifier, type_hint_union, PyStaticExpr};
 use crate::py_result_ext::PyResultExt;
+use crate::sync::PyOnceLock;
 use crate::type_object::PyTypeCheck;
 use crate::types::any::PyAny;
-use crate::{ffi, Borrowed, Bound, BoundObject, IntoPyObject, IntoPyObjectExt};
-
-use super::PyWeakrefMethods;
+use crate::{ffi, Borrowed, Bound, BoundObject, IntoPyObject, IntoPyObjectExt, Py, Python};
 
 /// Represents any Python `weakref` Proxy type.
 ///
@@ -20,13 +22,23 @@ pyobject_native_type_named!(PyWeakrefProxy);
 // #[cfg(not(Py_LIMITED_API))]
 // pyobject_native_type_sized!(PyWeakrefProxy, ffi::PyWeakReference);
 
-impl PyTypeCheck for PyWeakrefProxy {
+unsafe impl PyTypeCheck for PyWeakrefProxy {
     const NAME: &'static str = "weakref.ProxyTypes";
-    #[cfg(feature = "experimental-inspect")]
-    const PYTHON_TYPE: &'static str = "weakref.ProxyType | weakref.CallableProxyType";
 
+    #[cfg(feature = "experimental-inspect")]
+    const TYPE_HINT: PyStaticExpr = type_hint_union!(
+        type_hint_identifier!("weakref", "ProxyType"),
+        type_hint_identifier!("weakref", "CallableProxyType")
+    );
+
+    #[inline]
     fn type_check(object: &Bound<'_, PyAny>) -> bool {
         unsafe { ffi::PyWeakref_CheckProxy(object.as_ptr()) > 0 }
+    }
+
+    fn classinfo_object(py: Python<'_>) -> Bound<'_, PyAny> {
+        static TYPE: PyOnceLock<Py<PyAny>> = PyOnceLock::new();
+        TYPE.import(py, "weakref", "ProxyTypes").unwrap().clone()
     }
 }
 
@@ -77,7 +89,7 @@ impl PyWeakrefProxy {
                 object.py(),
                 ffi::PyWeakref_NewProxy(object.as_ptr(), ffi::Py_None()),
             )
-            .downcast_into_unchecked()
+            .cast_into_unchecked()
         }
     }
 
@@ -105,13 +117,13 @@ impl PyWeakrefProxy {
     /// fn callback(wref: Bound<'_, PyWeakrefProxy>) -> PyResult<()> {
     ///         let py = wref.py();
     ///         assert!(wref.upgrade_as::<Foo>()?.is_none());
-    ///         py.run(c_str!("counter = 1"), None, None)
+    ///         py.run(c"counter = 1", None, None)
     /// }
     ///
     /// # fn main() -> PyResult<()> {
     /// Python::attach(|py| {
-    ///     py.run(c_str!("counter = 0"), None, None)?;
-    ///     assert_eq!(py.eval(c_str!("counter"), None, None)?.extract::<u32>()?, 0);
+    ///     py.run(c"counter = 0", None, None)?;
+    ///     assert_eq!(py.eval(c"counter", None, None)?.extract::<u32>()?, 0);
     ///     let foo = Bound::new(py, Foo{})?;
     ///
     ///     // This is fine.
@@ -121,7 +133,7 @@ impl PyWeakrefProxy {
     ///         // In normal situations where a direct `Bound<'py, Foo>` is required use `upgrade::<Foo>`
     ///         weakref.upgrade().is_some_and(|obj| obj.is(&foo))
     ///     );
-    ///     assert_eq!(py.eval(c_str!("counter"), None, None)?.extract::<u32>()?, 0);
+    ///     assert_eq!(py.eval(c"counter", None, None)?.extract::<u32>()?, 0);
     ///
     ///     let weakref2 = PyWeakrefProxy::new_with(&foo, wrap_pyfunction!(callback, py)?)?;
     ///     assert!(!weakref.is(&weakref2)); // Not the same weakref
@@ -130,7 +142,7 @@ impl PyWeakrefProxy {
     ///     drop(foo);
     ///
     ///     assert!(weakref.upgrade_as::<Foo>()?.is_none());
-    ///     assert_eq!(py.eval(c_str!("counter"), None, None)?.extract::<u32>()?, 1);
+    ///     assert_eq!(py.eval(c"counter", None, None)?.extract::<u32>()?, 1);
     ///     Ok(())
     /// })
     /// # }
@@ -152,7 +164,7 @@ impl PyWeakrefProxy {
                     object.py(),
                     ffi::PyWeakref_NewProxy(object.as_ptr(), callback.as_ptr()),
                 )
-                .downcast_into_unchecked()
+                .cast_into_unchecked()
             }
         }
 
@@ -171,9 +183,9 @@ impl<'py> PyWeakrefMethods<'py> for Bound<'py, PyWeakrefProxy> {
     fn upgrade(&self) -> Option<Bound<'py, PyAny>> {
         let mut obj: *mut ffi::PyObject = std::ptr::null_mut();
         match unsafe { ffi::compat::PyWeakref_GetRef(self.as_ptr(), &mut obj) } {
-            std::os::raw::c_int::MIN..=-1 => panic!("The 'weakref.ProxyType' (or `weakref.CallableProxyType`) instance should be valid (non-null and actually a weakref reference)"),
+            std::ffi::c_int::MIN..=-1 => panic!("The 'weakref.ProxyType' (or `weakref.CallableProxyType`) instance should be valid (non-null and actually a weakref reference)"),
             0 => None,
-            1..=std::os::raw::c_int::MAX => Some(unsafe { obj.assume_owned_unchecked(self.py()) }),
+            1..=std::ffi::c_int::MAX => Some(unsafe { obj.assume_owned_unchecked(self.py()) }),
         }
     }
 }
@@ -241,15 +253,16 @@ mod tests {
 
         mod python_class {
             use super::*;
-            use crate::ffi;
+            #[cfg(Py_3_10)]
+            use crate::types::PyInt;
+            use crate::PyTypeCheck;
             use crate::{py_result_ext::PyResultExt, types::PyDict, types::PyType};
             use std::ptr;
 
             fn get_type(py: Python<'_>) -> PyResult<Bound<'_, PyType>> {
                 let globals = PyDict::new(py);
-                py.run(ffi::c_str!("class A:\n    pass\n"), Some(&globals), None)?;
-                py.eval(ffi::c_str!("A"), Some(&globals), None)
-                    .downcast_into::<PyType>()
+                py.run(c"class A:\n    pass\n", Some(&globals), None)?;
+                py.eval(c"A", Some(&globals), None).cast_into::<PyType>()
             }
 
             #[test]
@@ -412,9 +425,36 @@ mod tests {
                     Ok(())
                 })
             }
+
+            #[test]
+            fn test_type_object() -> PyResult<()> {
+                Python::attach(|py| {
+                    let class = get_type(py)?;
+                    let object = class.call0()?;
+                    let reference = PyWeakrefProxy::new(&object)?;
+                    let t = PyWeakrefProxy::classinfo_object(py);
+                    assert!(reference.is_instance(&t)?);
+                    Ok(())
+                })
+            }
+
+            #[cfg(Py_3_10)] // Name is different in 3.9
+            #[test]
+            fn test_classinfo_downcast_error() -> PyResult<()> {
+                Python::attach(|py| {
+                    assert_eq!(
+                        PyInt::new(py, 1)
+                            .cast_into::<PyWeakrefProxy>()
+                            .unwrap_err()
+                            .to_string(),
+                        "'int' object is not an instance of 'ProxyType | CallableProxyType'"
+                    );
+                    Ok(())
+                })
+            }
         }
 
-        // under 'abi3-py37' and 'abi3-py38' PyClass cannot be weakreferencable.
+        // under 'abi3-py38' PyClass cannot be weakreferencable.
         #[cfg(all(feature = "macros", not(all(Py_LIMITED_API, not(Py_3_9)))))]
         mod pyo3_pyclass {
             use super::*;
@@ -573,19 +613,18 @@ mod tests {
 
         mod python_class {
             use super::*;
-            use crate::ffi;
+            use crate::PyTypeCheck;
             use crate::{py_result_ext::PyResultExt, types::PyDict, types::PyType};
             use std::ptr;
 
             fn get_type(py: Python<'_>) -> PyResult<Bound<'_, PyType>> {
                 let globals = PyDict::new(py);
                 py.run(
-                    ffi::c_str!("class A:\n    def __call__(self):\n        return 'This class is callable!'\n"),
+                    c"class A:\n    def __call__(self):\n        return 'This class is callable!'\n",
                     Some(&globals),
                     None,
                 )?;
-                py.eval(ffi::c_str!("A"), Some(&globals), None)
-                    .downcast_into::<PyType>()
+                py.eval(c"A", Some(&globals), None).cast_into::<PyType>()
             }
 
             #[test]
@@ -718,9 +757,21 @@ mod tests {
                     Ok(())
                 })
             }
+
+            #[test]
+            fn test_type_object() -> PyResult<()> {
+                Python::attach(|py| {
+                    let class = get_type(py)?;
+                    let object = class.call0()?;
+                    let reference = PyWeakrefProxy::new(&object)?;
+                    let t = PyWeakrefProxy::classinfo_object(py);
+                    assert!(reference.is_instance(&t)?);
+                    Ok(())
+                })
+            }
         }
 
-        // under 'abi3-py37' and 'abi3-py38' PyClass cannot be weakreferencable.
+        // under 'abi3-py38' PyClass cannot be weakreferencable.
         #[cfg(all(feature = "macros", not(all(Py_LIMITED_API, not(Py_3_9)))))]
         mod pyo3_pyclass {
             use super::*;

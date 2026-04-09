@@ -5,11 +5,8 @@ use pyo3::prelude::*;
 use pyo3::py_run;
 use pyo3::types::PyString;
 use pyo3::types::{IntoPyDict, PyDict, PyTuple};
-use pyo3::BoundObject;
-use pyo3_ffi::c_str;
 
-#[path = "../src/tests/common.rs"]
-mod common;
+mod test_utils;
 
 #[pyclass]
 struct AnonClass {}
@@ -36,41 +33,44 @@ fn double(x: usize) -> usize {
     x * 2
 }
 
-/// This module is implemented in Rust.
-#[pymodule(gil_used = false)]
-fn module_with_functions(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    #[pyfn(m)]
-    #[pyo3(name = "no_parameters")]
-    fn function_with_name() -> usize {
-        42
-    }
-
-    #[pyfn(m)]
-    #[pyo3(pass_module)]
-    fn with_module<'py>(module: &Bound<'py, PyModule>) -> PyResult<Bound<'py, PyString>> {
-        module.name()
-    }
-
-    #[pyfn(m)]
-    fn double_value(v: &ValueClass) -> usize {
-        v.value * 2
-    }
-
-    m.add_class::<AnonClass>()?;
-    m.add_class::<ValueClass>()?;
-    m.add_class::<LocatedClass>()?;
-
-    m.add("foo", "bar")?;
-
-    m.add_function(wrap_pyfunction!(double, m)?)?;
-    m.add("also_double", wrap_pyfunction!(double, m)?)?;
-
-    Ok(())
-}
-
 #[test]
 fn test_module_with_functions() {
     use pyo3::wrap_pymodule;
+
+    /// This module is implemented in Rust.
+    #[pymodule]
+    mod module_with_functions {
+        use super::*;
+
+        #[pymodule_export]
+        use super::{AnonClass, ValueClass};
+
+        #[pymodule_init]
+        fn init_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
+            m.add_class::<LocatedClass>()?;
+            m.add("foo", "bar")?;
+            m.add_function(wrap_pyfunction!(double, m)?)?;
+            m.add("also_double", wrap_pyfunction!(double, m)?)?;
+            Ok(())
+        }
+
+        #[pyfunction]
+        #[pyo3(name = "no_parameters")]
+        fn function_with_name() -> usize {
+            42
+        }
+
+        #[pyfunction]
+        #[pyo3(pass_module)]
+        fn with_module<'py>(module: &Bound<'py, PyModule>) -> PyResult<Bound<'py, PyString>> {
+            module.name()
+        }
+
+        #[pyfunction]
+        fn double_value(v: &ValueClass) -> usize {
+            v.value * 2
+        }
+    }
 
     Python::attach(|py| {
         let d = [(
@@ -115,6 +115,87 @@ fn test_module_with_functions() {
             py,
             *d,
             "module_with_functions.with_module() == 'module_with_functions'"
+        );
+    });
+}
+
+#[test]
+#[allow(deprecated)]
+fn test_module_with_pyfn() {
+    use pyo3::wrap_pymodule;
+
+    /// This module is implemented in Rust.
+    #[pymodule]
+    fn module_with_pyfn(m: &Bound<'_, PyModule>) -> PyResult<()> {
+        #[pyfn(m)]
+        #[pyo3(name = "no_parameters")]
+        fn function_with_name() -> usize {
+            42
+        }
+
+        #[pyfn(m)]
+        #[pyo3(pass_module)]
+        fn with_module<'py>(module: &Bound<'py, PyModule>) -> PyResult<Bound<'py, PyString>> {
+            module.name()
+        }
+
+        #[pyfn(m)]
+        fn double_value(v: &ValueClass) -> usize {
+            v.value * 2
+        }
+
+        m.add_class::<AnonClass>()?;
+        m.add_class::<ValueClass>()?;
+        m.add_class::<LocatedClass>()?;
+
+        m.add("foo", "bar")?;
+
+        m.add_function(wrap_pyfunction!(double, m)?)?;
+        m.add("also_double", wrap_pyfunction!(double, m)?)?;
+
+        Ok(())
+    }
+
+    Python::attach(|py| {
+        let d = [("module_with_pyfn", wrap_pymodule!(module_with_pyfn)(py))]
+            .into_py_dict(py)
+            .unwrap();
+
+        py_assert!(
+            py,
+            *d,
+            "module_with_pyfn.__doc__ == 'This module is implemented in Rust.'"
+        );
+        py_assert!(py, *d, "module_with_pyfn.no_parameters() == 42");
+        py_assert!(py, *d, "module_with_pyfn.foo == 'bar'");
+        py_assert!(py, *d, "module_with_pyfn.AnonClass != None");
+        py_assert!(py, *d, "module_with_pyfn.LocatedClass != None");
+        py_assert!(
+            py,
+            *d,
+            "module_with_pyfn.LocatedClass.__module__ == 'module'"
+        );
+        py_assert!(py, *d, "module_with_pyfn.double(3) == 6");
+        py_assert!(
+            py,
+            *d,
+            "module_with_pyfn.double.__doc__ == 'Doubles the given value'"
+        );
+        py_assert!(py, *d, "module_with_pyfn.also_double(3) == 6");
+        py_assert!(
+            py,
+            *d,
+            "module_with_pyfn.also_double.__doc__ == 'Doubles the given value'"
+        );
+        py_assert!(
+            py,
+            *d,
+            "module_with_pyfn.double_value(module_with_pyfn.ValueClass(1)) == 2"
+        );
+        py_assert!(
+            py,
+            *d,
+            "module_with_pyfn.with_module() == 'module_with_pyfn'"
         );
     });
 }
@@ -166,9 +247,9 @@ fn test_module_from_code_bound() {
     Python::attach(|py| {
         let adder_mod = PyModule::from_code(
             py,
-            c_str!("def add(a,b):\n\treturn a+b"),
-            c_str!("adder_mod.py"),
-            &common::generate_unique_module_name("adder_mod"),
+            c"def add(a,b):\n\treturn a+b",
+            c"adder_mod.py",
+            &test_utils::generate_unique_module_name("adder_mod"),
         )
         .expect("Module code should be loaded");
 
@@ -181,8 +262,6 @@ fn test_module_from_code_bound() {
             .expect("A value should be returned")
             .extract()
             .expect("The value should be able to be converted to an i32");
-
-        adder_mod.gil_used(false).expect("Disabling the GIL failed");
 
         assert_eq!(ret_value, 3);
     });
@@ -286,10 +365,10 @@ fn superfunction() -> String {
 #[pymodule]
 fn supermodule(module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_function(wrap_pyfunction!(superfunction, module)?)?;
-    let module_to_add = PyModule::new(module.py(), "submodule")?;
+    let module_to_add = PyModule::new(module.py(), "supermodule.submodule")?;
     submodule(&module_to_add)?;
     module.add_submodule(&module_to_add)?;
-    let module_to_add = PyModule::new(module.py(), "submodule_with_init_fn")?;
+    let module_to_add = PyModule::new(module.py(), "supermodule.submodule_with_init_fn")?;
     submodule_with_init_fn(&module_to_add)?;
     module.add_submodule(&module_to_add)?;
     Ok(())
@@ -317,42 +396,36 @@ fn test_module_nesting() {
             supermodule,
             "supermodule.submodule_with_init_fn.subfunction() == 'Subfunction'"
         );
-    });
-}
 
-// Test that argument parsing specification works for pyfunctions
+        // submodule dunder name and attribute name
+        py_assert!(
+            py,
+            supermodule,
+            "supermodule.submodule.__name__ == 'supermodule.submodule'"
+        );
+        py_assert!(py, supermodule, "'submodule' in supermodule.__dict__");
+        py_assert!(
+            py,
+            supermodule,
+            "'supermodule.submodule' not in supermodule.__dict__"
+        );
 
-#[pyfunction(signature = (a=5, *args))]
-fn ext_vararg_fn(py: Python<'_>, a: i32, args: &Bound<'_, PyTuple>) -> PyResult<PyObject> {
-    [
-        a.into_pyobject(py)?.into_any().into_bound(),
-        args.as_any().clone(),
-    ]
-    .into_pyobject(py)
-    .map(Bound::unbind)
-}
-
-#[pymodule]
-fn vararg_module(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    #[pyfn(m, signature = (a=5, *args))]
-    fn int_vararg_fn(py: Python<'_>, a: i32, args: &Bound<'_, PyTuple>) -> PyResult<PyObject> {
-        ext_vararg_fn(py, a, args)
-    }
-
-    m.add_function(wrap_pyfunction!(ext_vararg_fn, m)?).unwrap();
-    Ok(())
-}
-
-#[test]
-fn test_vararg_module() {
-    Python::attach(|py| {
-        let m = pyo3::wrap_pymodule!(vararg_module)(py);
-
-        py_assert!(py, m, "m.ext_vararg_fn() == [5, ()]");
-        py_assert!(py, m, "m.ext_vararg_fn(1, 2) == [1, (2,)]");
-
-        py_assert!(py, m, "m.int_vararg_fn() == [5, ()]");
-        py_assert!(py, m, "m.int_vararg_fn(1, 2) == [1, (2,)]");
+        // submodule_with_init_fn dunder name and attribute name
+        py_assert!(
+            py,
+            supermodule,
+            "supermodule.submodule_with_init_fn.__name__ == 'supermodule.submodule_with_init_fn'"
+        );
+        py_assert!(
+            py,
+            supermodule,
+            "'submodule_with_init_fn' in supermodule.__dict__"
+        );
+        py_assert!(
+            py,
+            supermodule,
+            "'supermodule.submodule_with_init_fn' not in supermodule.__dict__"
+        );
     });
 }
 
@@ -479,7 +552,7 @@ fn test_module_functions_with_module() {
 #[test]
 fn test_module_doc_hidden() {
     #[doc(hidden)]
-    #[allow(clippy::unnecessary_wraps)]
+    #[expect(clippy::unnecessary_wraps)]
     #[pymodule]
     fn my_module(_m: &Bound<'_, PyModule>) -> PyResult<()> {
         Ok(())

@@ -6,8 +6,7 @@ use pyo3::{prelude::*, py_run};
 use std::iter;
 use std::sync::Mutex;
 
-#[path = "../src/tests/common.rs"]
-mod common;
+mod test_utils;
 
 #[pyclass]
 struct EmptyClass;
@@ -21,7 +20,7 @@ struct ExampleClass {
 
 #[pymethods]
 impl ExampleClass {
-    fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<PyObject> {
+    fn __getattr__(&self, py: Python<'_>, attr: &str) -> PyResult<Py<PyAny>> {
         if attr == "special_custom_attr" {
             Ok(self.custom_attr.into_pyobject(py)?.into_any().unbind())
         } else {
@@ -218,7 +217,7 @@ fn mapping() {
         )
         .unwrap();
 
-        let mapping: &Bound<'_, PyMapping> = inst.bind(py).downcast().unwrap();
+        let mapping: &Bound<'_, PyMapping> = inst.bind(py).cast().unwrap();
 
         py_assert!(py, inst, "len(inst) == 0");
 
@@ -252,7 +251,7 @@ enum SequenceIndex<'py> {
 
 #[pyclass]
 pub struct Sequence {
-    values: Vec<PyObject>,
+    values: Vec<Py<PyAny>>,
 }
 
 #[pymethods]
@@ -261,7 +260,7 @@ impl Sequence {
         self.values.len()
     }
 
-    fn __getitem__(&self, index: SequenceIndex<'_>, py: Python<'_>) -> PyResult<PyObject> {
+    fn __getitem__(&self, index: SequenceIndex<'_>, py: Python<'_>) -> PyResult<Py<PyAny>> {
         match index {
             SequenceIndex::Integer(index) => {
                 let uindex = self.usize_index(index)?;
@@ -275,7 +274,7 @@ impl Sequence {
         }
     }
 
-    fn __setitem__(&mut self, index: isize, value: PyObject) -> PyResult<()> {
+    fn __setitem__(&mut self, index: isize, value: Py<PyAny>) -> PyResult<()> {
         let uindex = self.usize_index(index)?;
         self.values
             .get_mut(uindex)
@@ -293,7 +292,7 @@ impl Sequence {
         }
     }
 
-    fn append(&mut self, value: PyObject) {
+    fn append(&mut self, value: Py<PyAny>) {
         self.values.push(value);
     }
 }
@@ -320,7 +319,7 @@ fn sequence() {
 
         let inst = Py::new(py, Sequence { values: vec![] }).unwrap();
 
-        let sequence: &Bound<'_, PySequence> = inst.bind(py).downcast().unwrap();
+        let sequence: &Bound<'_, PySequence> = inst.bind(py).cast().unwrap();
 
         py_assert!(py, inst, "len(inst) == 0");
 
@@ -527,7 +526,7 @@ struct GetItem {}
 #[pymethods]
 impl GetItem {
     fn __getitem__(&self, idx: &Bound<'_, PyAny>) -> PyResult<&'static str> {
-        if let Ok(slice) = idx.downcast::<PySlice>() {
+        if let Ok(slice) = idx.cast::<PySlice>() {
             let indices = slice.indices(1000)?;
             if indices.start == 100 && indices.stop == 200 && indices.step == 1 {
                 return Ok("slice");
@@ -581,8 +580,14 @@ struct ClassWithGetAttribute {
 
 #[pymethods]
 impl ClassWithGetAttribute {
-    fn __getattribute__(&self, _name: &str) -> u32 {
-        self.data * 2
+    fn __getattribute__(&self, name: &str) -> PyResult<u32> {
+        if name == "data" {
+            Ok(self.data * 2)
+        } else {
+            Err(PyAttributeError::new_err(
+                "this message will be swallowed by default `__getattr__`",
+            ))
+        }
     }
 }
 
@@ -591,7 +596,7 @@ fn getattribute_overrides_member() {
     Python::attach(|py| {
         let inst = Py::new(py, ClassWithGetAttribute { data: 4 }).unwrap();
         py_assert!(py, inst, "inst.data == 8");
-        py_assert!(py, inst, "inst.y == 8");
+        py_expect_exception!(py, inst, "inst.y == 8", PyAttributeError, "y");
     });
 }
 
@@ -634,14 +639,14 @@ fn getattr_and_getattribute() {
 #[pyclass]
 #[derive(Debug)]
 struct OnceFuture {
-    future: PyObject,
+    future: Py<PyAny>,
     polled: bool,
 }
 
 #[pymethods]
 impl OnceFuture {
     #[new]
-    fn new(future: PyObject) -> Self {
+    fn new(future: Py<PyAny>) -> Self {
         OnceFuture {
             future,
             polled: false,
@@ -670,8 +675,7 @@ impl OnceFuture {
 fn test_await() {
     Python::attach(|py| {
         let once = py.get_type::<OnceFuture>();
-        let source = pyo3_ffi::c_str!(
-            r#"
+        let source = cr#"
 import asyncio
 import sys
 
@@ -684,8 +688,7 @@ if sys.platform == "win32" and sys.version_info >= (3, 8, 0):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 asyncio.run(main())
-"#
-        );
+"#;
         let globals = PyModule::import(py, "__main__").unwrap().dict();
         globals.set_item("Once", once).unwrap();
         py.run(source, Some(&globals), None)
@@ -722,8 +725,7 @@ impl AsyncIterator {
 fn test_anext_aiter() {
     Python::attach(|py| {
         let once = py.get_type::<OnceFuture>();
-        let source = pyo3_ffi::c_str!(
-            r#"
+        let source = cr#"
 import asyncio
 import sys
 
@@ -740,8 +742,7 @@ if sys.platform == "win32" and sys.version_info >= (3, 8, 0):
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
 
 asyncio.run(main())
-"#
-        );
+"#;
         let globals = PyModule::import(py, "__main__").unwrap().dict();
         globals.set_item("Once", once).unwrap();
         globals
@@ -789,7 +790,7 @@ impl DescrCounter {
 fn descr_getset() {
     Python::attach(|py| {
         let counter = py.get_type::<DescrCounter>();
-        let source = pyo3_ffi::c_str!(pyo3::indoc::indoc!(
+        let source = pyo3_ffi::c_str!(
             r#"
 class Class:
     counter = Counter()
@@ -813,7 +814,7 @@ assert c.counter.count == 4
 del c.counter
 assert c.counter.count == 1
 "#
-        ));
+        );
         let globals = PyModule::import(py, "__main__").unwrap().dict();
         globals.set_item("Counter", counter).unwrap();
         py.run(source, Some(&globals), None)
@@ -828,7 +829,7 @@ struct NotHashable;
 #[pymethods]
 impl NotHashable {
     #[classattr]
-    const __hash__: Option<PyObject> = None;
+    const __hash__: Option<Py<PyAny>> = None;
 }
 
 #[test]
@@ -850,7 +851,7 @@ struct DefaultedContains;
 
 #[pymethods]
 impl DefaultedContains {
-    fn __iter__(&self, py: Python<'_>) -> PyObject {
+    fn __iter__(&self, py: Python<'_>) -> Py<PyAny> {
         PyList::new(py, ["a", "b", "c"])
             .unwrap()
             .as_any()
@@ -865,7 +866,7 @@ struct NoContains;
 
 #[pymethods]
 impl NoContains {
-    fn __iter__(&self, py: Python<'_>) -> PyObject {
+    fn __iter__(&self, py: Python<'_>) -> Py<PyAny> {
         PyList::new(py, ["a", "b", "c"])
             .unwrap()
             .as_any()
@@ -877,7 +878,7 @@ impl NoContains {
     // Equivalent to the opt-out const form in NotHashable above, just more verbose, to confirm this
     // also works.
     #[classattr]
-    fn __contains__() -> Option<PyObject> {
+    fn __contains__() -> Option<Py<PyAny>> {
         None
     }
 }

@@ -3,7 +3,7 @@ use crate::ffi::Py_ssize_t;
 use crate::ffi_ptr_ext::FfiPtrExt;
 use crate::instance::{Borrowed, Bound};
 use crate::py_result_ext::PyResultExt;
-use crate::types::{PyAny, PyAnyMethods, PyList, PyMapping};
+use crate::types::{PyAny, PyList, PyMapping};
 use crate::{ffi, BoundObject, IntoPyObject, IntoPyObjectExt, Python};
 
 /// Represents a Python `dict`.
@@ -16,12 +16,15 @@ use crate::{ffi, BoundObject, IntoPyObject, IntoPyObjectExt, Python};
 #[repr(transparent)]
 pub struct PyDict(PyAny);
 
+#[cfg(not(GraalPy))]
 pyobject_subclassable_native_type!(PyDict, crate::ffi::PyDictObject);
 
 pyobject_native_type!(
     PyDict,
     ffi::PyDictObject,
     pyobject_native_static_type_object!(ffi::PyDict_Type),
+    "builtins",
+    "dict",
     #checkfunction=ffi::PyDict_Check
 );
 
@@ -34,6 +37,8 @@ pub struct PyDictKeys(PyAny);
 pyobject_native_type_core!(
     PyDictKeys,
     pyobject_native_static_type_object!(ffi::PyDictKeys_Type),
+    "builtins",
+    "dict_keys",
     #checkfunction=ffi::PyDictKeys_Check
 );
 
@@ -46,6 +51,8 @@ pub struct PyDictValues(PyAny);
 pyobject_native_type_core!(
     PyDictValues,
     pyobject_native_static_type_object!(ffi::PyDictValues_Type),
+    "builtins",
+    "dict_values",
     #checkfunction=ffi::PyDictValues_Check
 );
 
@@ -58,13 +65,15 @@ pub struct PyDictItems(PyAny);
 pyobject_native_type_core!(
     PyDictItems,
     pyobject_native_static_type_object!(ffi::PyDictItems_Type),
+    "builtins",
+    "dict_items",
     #checkfunction=ffi::PyDictItems_Check
 );
 
 impl PyDict {
     /// Creates a new empty dictionary.
     pub fn new(py: Python<'_>) -> Bound<'_, PyDict> {
-        unsafe { ffi::PyDict_New().assume_owned(py).downcast_into_unchecked() }
+        unsafe { ffi::PyDict_New().assume_owned(py).cast_into_unchecked() }
     }
 
     /// Creates a new dictionary from the sequence given.
@@ -205,7 +214,7 @@ impl<'py> PyDictMethods<'py> for Bound<'py, PyDict> {
         unsafe {
             ffi::PyDict_Copy(self.as_ptr())
                 .assume_owned_or_err(self.py())
-                .downcast_into_unchecked()
+                .cast_into_unchecked()
         }
     }
 
@@ -253,9 +262,9 @@ impl<'py> PyDictMethods<'py> for Bound<'py, PyDict> {
             match unsafe {
                 ffi::compat::PyDict_GetItemRef(dict.as_ptr(), key.as_ptr(), &mut result)
             } {
-                std::os::raw::c_int::MIN..=-1 => Err(PyErr::fetch(py)),
+                std::ffi::c_int::MIN..=-1 => Err(PyErr::fetch(py)),
                 0 => Ok(None),
-                1..=std::os::raw::c_int::MAX => {
+                1..=std::ffi::c_int::MAX => {
                     // Safety: PyDict_GetItemRef positive return value means the result is a valid
                     // owned reference
                     Ok(Some(unsafe { result.assume_owned_unchecked(py) }))
@@ -314,7 +323,7 @@ impl<'py> PyDictMethods<'py> for Bound<'py, PyDict> {
         unsafe {
             ffi::PyDict_Keys(self.as_ptr())
                 .assume_owned(self.py())
-                .downcast_into_unchecked()
+                .cast_into_unchecked()
         }
     }
 
@@ -322,7 +331,7 @@ impl<'py> PyDictMethods<'py> for Bound<'py, PyDict> {
         unsafe {
             ffi::PyDict_Values(self.as_ptr())
                 .assume_owned(self.py())
-                .downcast_into_unchecked()
+                .cast_into_unchecked()
         }
     }
 
@@ -330,7 +339,7 @@ impl<'py> PyDictMethods<'py> for Bound<'py, PyDict> {
         unsafe {
             ffi::PyDict_Items(self.as_ptr())
                 .assume_owned(self.py())
-                .downcast_into_unchecked()
+                .cast_into_unchecked()
         }
     }
 
@@ -351,18 +360,18 @@ impl<'py> PyDictMethods<'py> for Bound<'py, PyDict> {
 
         #[cfg(not(feature = "nightly"))]
         {
-            crate::sync::with_critical_section(self, || {
+            crate::sync::critical_section::with_critical_section(self, || {
                 self.iter().try_for_each(|(key, value)| f(key, value))
             })
         }
     }
 
     fn as_mapping(&self) -> &Bound<'py, PyMapping> {
-        unsafe { self.downcast_unchecked() }
+        unsafe { self.cast_unchecked() }
     }
 
     fn into_mapping(self) -> Bound<'py, PyMapping> {
-        unsafe { self.into_any().downcast_into_unchecked() }
+        unsafe { self.cast_into_unchecked() }
     }
 
     fn update(&self, other: &Bound<'_, PyMapping>) -> PyResult<()> {
@@ -390,18 +399,12 @@ impl<'a, 'py> Borrowed<'a, 'py, PyDict> {
 }
 
 fn dict_len(dict: &Bound<'_, PyDict>) -> Py_ssize_t {
-    #[cfg(any(not(Py_3_8), PyPy, GraalPy, Py_LIMITED_API, Py_GIL_DISABLED))]
+    #[cfg(any(PyPy, GraalPy, Py_LIMITED_API, Py_GIL_DISABLED))]
     unsafe {
         ffi::PyDict_Size(dict.as_ptr())
     }
 
-    #[cfg(all(
-        Py_3_8,
-        not(PyPy),
-        not(GraalPy),
-        not(Py_LIMITED_API),
-        not(Py_GIL_DISABLED)
-    ))]
+    #[cfg(not(any(PyPy, GraalPy, Py_LIMITED_API, Py_GIL_DISABLED)))]
     unsafe {
         (*dict.as_ptr().cast::<ffi::PyDictObject>()).ma_used
     }
@@ -490,7 +493,9 @@ impl DictIterImpl {
         F: FnOnce(&mut Self) -> R,
     {
         match self {
-            Self::DictIter { .. } => crate::sync::with_critical_section(dict, || f(self)),
+            Self::DictIter { .. } => {
+                crate::sync::critical_section::with_critical_section(dict, || f(self))
+            }
         }
     }
 }
@@ -718,7 +723,12 @@ mod borrowed_iter {
                 // Safety:
                 // - PyDict_Next returns borrowed values
                 // - we have already checked that `PyDict_Next` succeeded, so we can assume these to be non-null
-                Some(unsafe { (key.assume_borrowed(py), value.assume_borrowed(py)) })
+                Some(unsafe {
+                    (
+                        key.assume_borrowed_unchecked(py),
+                        value.assume_borrowed_unchecked(py),
+                    )
+                })
             } else {
                 None
             }
@@ -814,7 +824,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::PyTuple;
+    use crate::types::{PyAnyMethods as _, PyTuple};
     use std::collections::{BTreeMap, HashMap};
 
     #[test]
@@ -1004,13 +1014,13 @@ mod tests {
     fn test_set_item_refcnt() {
         Python::attach(|py| {
             let cnt;
-            let obj = py.eval(ffi::c_str!("object()"), None, None).unwrap();
+            let obj = py.eval(c"object()", None, None).unwrap();
             {
-                cnt = obj.get_refcnt();
+                cnt = obj._get_refcnt();
                 let _dict = [(10, &obj)].into_py_dict(py);
             }
             {
-                assert_eq!(cnt, obj.get_refcnt());
+                assert_eq!(cnt, obj._get_refcnt());
             }
         });
     }
@@ -1063,7 +1073,7 @@ mod tests {
             let mut key_sum = 0;
             let mut value_sum = 0;
             for el in dict.items() {
-                let tuple = el.downcast::<PyTuple>().unwrap();
+                let tuple = el.cast::<PyTuple>().unwrap();
                 key_sum += tuple.get_item(0).unwrap().extract::<i32>().unwrap();
                 value_sum += tuple.get_item(1).unwrap().extract::<i32>().unwrap();
             }

@@ -1,6 +1,6 @@
 use crate::object::PyObject;
 use crate::pyport::Py_ssize_t;
-use std::os::raw::{c_char, c_int, c_void};
+use std::ffi::{c_char, c_int, c_void};
 use std::ptr;
 
 #[repr(C)]
@@ -55,7 +55,7 @@ pub type getbufferproc = unsafe extern "C" fn(*mut PyObject, *mut crate::Py_buff
 pub type releasebufferproc = unsafe extern "C" fn(*mut PyObject, *mut crate::Py_buffer);
 
 /* Return 1 if the getbuffer function is available, otherwise return 0. */
-extern "C" {
+extern_libpython! {
     #[cfg(not(PyPy))]
     pub fn PyObject_CheckBuffer(obj: *mut PyObject) -> c_int;
 
@@ -103,11 +103,7 @@ extern "C" {
 }
 
 /// Maximum number of dimensions
-pub const PyBUF_MAX_NDIM: usize = if cfg!(all(PyPy, not(Py_3_11))) {
-    36
-} else {
-    64
-};
+pub const PyBUF_MAX_NDIM: usize = 64;
 
 /* Flags for getting buffers */
 pub const PyBUF_SIMPLE: c_int = 0;

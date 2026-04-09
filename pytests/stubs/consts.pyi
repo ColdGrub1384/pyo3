@@ -1,4 +1,18 @@
-import typing
+from typing import Final, final
 
-PI: typing.Final = ...
-SIMPLE: typing.Final = "SIMPLE"
+ESCAPING: Final = "S\0\x01\t\n\r\"'\\"
+"""
+We experiment with "escaping"
+"""
+
+PI: Final[float]
+"""
+Exports PI constant as part of the module
+"""
+
+@final
+class ClassWithConst:
+    INSTANCE: Final[ClassWithConst]
+    """
+    A constant
+    """

@@ -12,7 +12,7 @@ use crate::{ffi, Bound, PyAny, PyResult, PyTypeInfo, Python};
 #[repr(transparent)]
 pub struct PyRange(PyAny);
 
-pyobject_native_type_core!(PyRange, pyobject_native_static_type_object!(ffi::PyRange_Type), #checkfunction=ffi::PyRange_Check);
+pyobject_native_type_core!(PyRange, pyobject_native_static_type_object!(ffi::PyRange_Type), "builtins", "range", #checkfunction=ffi::PyRange_Check);
 
 impl<'py> PyRange {
     /// Creates a new Python `range` object with a default step of 1.
@@ -30,7 +30,7 @@ impl<'py> PyRange {
         unsafe {
             Ok(Self::type_object(py)
                 .call1((start, stop, step))?
-                .downcast_into_unchecked())
+                .cast_into_unchecked())
         }
     }
 }

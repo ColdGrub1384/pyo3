@@ -1,16 +1,24 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
 use crate::conversion::IntoPyObject;
 use crate::exceptions::PyValueError;
-use crate::instance::Bound;
-use crate::sync::GILOnceCell;
+#[cfg(feature = "experimental-inspect")]
+use crate::inspect::{type_hint_identifier, type_hint_union, PyStaticExpr};
+use crate::sync::PyOnceLock;
 use crate::types::any::PyAnyMethods;
 use crate::types::string::PyStringMethods;
 use crate::types::PyType;
-use crate::{intern, FromPyObject, Py, PyAny, PyErr, PyResult, Python};
+use crate::{intern, Borrowed, Bound, FromPyObject, Py, PyAny, PyErr, Python};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 
-impl FromPyObject<'_> for IpAddr {
-    fn extract_bound(obj: &Bound<'_, PyAny>) -> PyResult<Self> {
+impl FromPyObject<'_, '_> for IpAddr {
+    type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const INPUT_TYPE: PyStaticExpr = type_hint_union!(
+        type_hint_identifier!("ipaddress", "IPv4Address"),
+        type_hint_identifier!("ipaddress", "IPv6Address")
+    );
+
+    fn extract(obj: Borrowed<'_, '_, PyAny>) -> Result<Self, Self::Error> {
         match obj.getattr(intern!(obj.py(), "packed")) {
             Ok(packed) => {
                 if let Ok(packed) = packed.extract::<[u8; 4]>() {
@@ -34,8 +42,11 @@ impl<'py> IntoPyObject<'py> for Ipv4Addr {
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = type_hint_identifier!("ipaddress", "IPv4Address");
+
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
-        static IPV4_ADDRESS: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+        static IPV4_ADDRESS: PyOnceLock<Py<PyType>> = PyOnceLock::new();
         IPV4_ADDRESS
             .import(py, "ipaddress", "IPv4Address")?
             .call1((u32::from_be_bytes(self.octets()),))
@@ -46,6 +57,9 @@ impl<'py> IntoPyObject<'py> for &Ipv4Addr {
     type Target = PyAny;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = Ipv4Addr::OUTPUT_TYPE;
 
     #[inline]
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
@@ -58,8 +72,11 @@ impl<'py> IntoPyObject<'py> for Ipv6Addr {
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = type_hint_identifier!("ipaddress", "IPv6Address");
+
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
-        static IPV6_ADDRESS: GILOnceCell<Py<PyType>> = GILOnceCell::new();
+        static IPV6_ADDRESS: PyOnceLock<Py<PyType>> = PyOnceLock::new();
         IPV6_ADDRESS
             .import(py, "ipaddress", "IPv6Address")?
             .call1((u128::from_be_bytes(self.octets()),))
@@ -71,6 +88,9 @@ impl<'py> IntoPyObject<'py> for &Ipv6Addr {
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
 
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = Ipv6Addr::OUTPUT_TYPE;
+
     #[inline]
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         (*self).into_pyobject(py)
@@ -81,6 +101,10 @@ impl<'py> IntoPyObject<'py> for IpAddr {
     type Target = PyAny;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr =
+        type_hint_union!(&Ipv4Addr::OUTPUT_TYPE, &Ipv6Addr::OUTPUT_TYPE);
 
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {
         match self {
@@ -94,6 +118,9 @@ impl<'py> IntoPyObject<'py> for &IpAddr {
     type Target = PyAny;
     type Output = Bound<'py, Self::Target>;
     type Error = PyErr;
+
+    #[cfg(feature = "experimental-inspect")]
+    const OUTPUT_TYPE: PyStaticExpr = IpAddr::OUTPUT_TYPE;
 
     #[inline]
     fn into_pyobject(self, py: Python<'py>) -> Result<Self::Output, Self::Error> {

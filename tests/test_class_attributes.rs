@@ -3,8 +3,7 @@
 use pyo3::prelude::*;
 use pyo3::py_run;
 
-#[path = "../src/tests/common.rs"]
-mod common;
+mod test_utils;
 
 #[pyclass]
 struct Foo {
@@ -152,40 +151,10 @@ fn recursive_class_attributes() {
 }
 
 #[test]
+#[cfg(panic = "unwind")]
 fn test_fallible_class_attribute() {
-    use pyo3::{exceptions::PyValueError, types::PyString};
-
-    struct CaptureStdErr<'py> {
-        oldstderr: Bound<'py, PyAny>,
-        string_io: Bound<'py, PyAny>,
-    }
-
-    impl<'py> CaptureStdErr<'py> {
-        fn new(py: Python<'py>) -> PyResult<Self> {
-            let sys = py.import("sys")?;
-            let oldstderr = sys.getattr("stderr")?;
-            let string_io = py.import("io")?.getattr("StringIO")?.call0()?;
-            sys.setattr("stderr", &string_io)?;
-            Ok(Self {
-                oldstderr,
-                string_io,
-            })
-        }
-
-        fn reset(self) -> PyResult<String> {
-            let py = self.string_io.py();
-            let payload = self
-                .string_io
-                .getattr("getvalue")?
-                .call0()?
-                .downcast::<PyString>()?
-                .to_cow()?
-                .into_owned();
-            let sys = py.import("sys")?;
-            sys.setattr("stderr", self.oldstderr)?;
-            Ok(payload)
-        }
-    }
+    use pyo3::exceptions::PyValueError;
+    use test_utils::UnraisableCapture;
 
     #[pyclass]
     struct BrokenClass;
@@ -199,21 +168,31 @@ fn test_fallible_class_attribute() {
     }
 
     Python::attach(|py| {
-        let stderr = CaptureStdErr::new(py).unwrap();
-        assert!(std::panic::catch_unwind(|| py.get_type::<BrokenClass>()).is_err());
+        let (err, object) = UnraisableCapture::enter(py, |capture| {
+            // Accessing the type will attempt to initialize the class attributes
+            assert!(std::panic::catch_unwind(|| py.get_type::<BrokenClass>()).is_err());
+
+            capture.take_capture().unwrap()
+        });
+
+        assert!(object.is_none());
         assert_eq!(
-            stderr.reset().unwrap().trim(),
-            "\
-ValueError: failed to create class attribute
+            err.to_string(),
+            "RuntimeError: An error occurred while initializing class BrokenClass"
+        );
 
-The above exception was the direct cause of the following exception:
+        let cause = err.cause(py).unwrap();
+        assert_eq!(
+            cause.to_string(),
+            "RuntimeError: An error occurred while initializing `BrokenClass.fails_to_init`"
+        );
 
-RuntimeError: An error occurred while initializing `BrokenClass.fails_to_init`
-
-The above exception was the direct cause of the following exception:
-
-RuntimeError: An error occurred while initializing class BrokenClass"
-        )
+        let cause = cause.cause(py).unwrap();
+        assert_eq!(
+            cause.to_string(),
+            "ValueError: failed to create class attribute"
+        );
+        assert!(cause.cause(py).is_none());
     });
 }
 
@@ -253,6 +232,42 @@ fn test_renaming_all_struct_fields() {
             .setattr("third_field", PyBool::new(py, true))
             .is_ok());
         py_assert!(py, struct_obj, "struct_obj.third_field == True");
+    });
+}
+
+#[pyclass(get_all, set_all, new = "from_fields")]
+struct AutoNewCls {
+    a: i32,
+    b: String,
+    c: Option<f64>,
+}
+
+#[test]
+fn new_impl() {
+    Python::attach(|py| {
+        // python should be able to do AutoNewCls(1, "two", 3.0)
+        let cls = py.get_type::<AutoNewCls>();
+        pyo3::py_run!(
+            py,
+            cls,
+            "inst = cls(1, 'two', 3.0); assert inst.a == 1; assert inst.b == 'two'; assert inst.c == 3.0"
+        );
+    });
+}
+
+#[pyclass(new = "from_fields", get_all)]
+struct Point2d(#[pyo3(name = "first")] f64, #[pyo3(name = "second")] f64);
+
+#[test]
+fn new_impl_tuple_struct() {
+    Python::attach(|py| {
+        // python should be able to do AutoNewCls(1, "two", 3.0)
+        let cls = py.get_type::<Point2d>();
+        pyo3::py_run!(
+            py,
+            cls,
+            "inst = cls(0.2, 0.3); assert inst.first == 0.2; assert inst.second == 0.3"
+        );
     });
 }
 

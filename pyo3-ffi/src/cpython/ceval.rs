@@ -1,8 +1,8 @@
 use crate::cpython::pystate::Py_tracefunc;
 use crate::object::{freefunc, PyObject};
-use std::os::raw::c_int;
+use std::ffi::c_int;
 
-extern "C" {
+extern_libpython! {
     // skipped non-limited _PyEval_CallTracing
 
     #[cfg(not(Py_3_11))]
