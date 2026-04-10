@@ -876,7 +876,6 @@ pub fn is_linking_libpython_for_target(target: &Triple) -> bool {
         || target.environment == Environment::Android
         || target.environment == Environment::Androideabi
         || target.operating_system == OperatingSystem::Cygwin
-        || matches!(target.operating_system, OperatingSystem::IOS(_))
         || !is_extension_module()
 }
 
